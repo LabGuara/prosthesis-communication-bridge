@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "prothesis-logger"
+name = "prothesis-logger-wrapper"
 version = "0.1.0"

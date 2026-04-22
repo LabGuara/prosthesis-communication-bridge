@@ -1,5 +1,5 @@
 [package]
-name = "prothesis-logger"
+name = "prothesis-logger-wrapper"
 version = "0.1.0"
 edition = "2024"
 
