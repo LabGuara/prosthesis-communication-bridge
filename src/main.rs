@@ -1,21 +1,29 @@
 use std::env;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
+
+use crate::mqtt::MqttPublisher;
+
+mod config;
+mod mqtt;
 
 fn read_and_forward_stream<R: Read>(
     mut reader: R,
-    mut destination: impl Write
+    mut destination: impl Write,
+    publisher: Option<Arc<MqttPublisher>>,
 ) -> io::Result<()> {
-    let mut buffer = [0u8; 8192];
+    let buffered_reader = BufReader::new(&mut reader);
 
-    loop {
-        let bytes_read = reader.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
+    for line in buffered_reader.lines() {
+        let line = line?;
+
+        if let Some(publisher) = &publisher {
+            publisher.publish(&line);
         }
 
-        destination.write_all(&buffer[..bytes_read])?;
+        writeln!(destination, "{line}")?;
         destination.flush()?;
     }
 
@@ -23,6 +31,14 @@ fn read_and_forward_stream<R: Read>(
 }
 
 fn run() -> io::Result<i32> {
+    let publisher = match MqttPublisher::from_env() {
+        Ok(publisher) => Some(Arc::new(publisher)),
+        Err(err) => {
+            eprintln!("MQTT init error: {err}");
+            None
+        }
+    };
+
     let mut arguments = env::args().skip(1);
     
     let Some(executable) = arguments.next() else {
@@ -49,16 +65,18 @@ fn run() -> io::Result<i32> {
         .take()
         .ok_or_else(|| io::Error::other("failed to capture child stderr"))?;
 
+    let stdout_publisher = publisher.clone();
     let stdout_thread = thread::spawn(move || {
         let destination = io::stdout();
         let destination_lock = destination.lock();
-        read_and_forward_stream(stdout, destination_lock)
+        read_and_forward_stream(stdout, destination_lock, stdout_publisher)
     });
 
+    let stderr_publisher = publisher.clone();
     let stderr_thread = thread::spawn(move || {
         let destination = io::stderr();
         let destination_lock = destination.lock();
-        read_and_forward_stream(stderr, destination_lock)
+        read_and_forward_stream(stderr, destination_lock, stderr_publisher)
     });
 
     let status = child.wait()?;

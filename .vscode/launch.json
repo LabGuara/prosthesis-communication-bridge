@@ -5,20 +5,25 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug executable 'prothesis-logger'",
+      "name": "Debug executable 'prothesis-logger-wrapper'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "--bin=prothesis-logger", "--"]
+        "args": ["run", "--bin=prothesis-logger-wrapper", "--"]
       },
-      "args": ["cmd.exe", "/C", "echo hello"]
+      "args": [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "while ($true) { Write-Output 'hello'; Start-Sleep -Seconds 5 }"
+      ]
     },
     {
-      "name": "Debug unit tests in executable 'prothesis-logger'",
+      "name": "Debug unit tests in executable 'prothesis-logger-wrapper'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["test", "--bin=prothesis-logger"]
+        "args": ["test", "--bin=prothesis-logger-wrapper"]
       }
     }
   ]
