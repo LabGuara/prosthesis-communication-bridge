@@ -1,6 +1,7 @@
+use crate::models::log_level::LogLevel;
+use crate::models::log::Log;
 use crate::config::MqttConfig;
 use rumqttc::{Client, MqttOptions, QoS, RecvTimeoutError};
-use serde_json::json;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
@@ -31,14 +32,15 @@ impl MqttPublisher {
         thread::spawn(move || {
             loop {
                 while let Ok(message) = receiver.try_recv() {
-                    let payload = json!({
-                        "level": "normal",
-                        "sensor_type": "action",
-                        "sensor_name": "action-01",
-                        "message": message.trim()
-                    });
+                    let log = Log {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Info,
+                        sensor_name: "prothesis-logger".to_string(),
+                        message,
+                    };
 
-                    let json_str = payload.to_string();
+                    let json_str = log.generate_payload();
+
                     if let Err(err) = client.publish(&topic, qos, false, json_str) {
                         eprintln!("MQTT publish error: {err}");
                     }

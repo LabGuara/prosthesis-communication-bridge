@@ -8,6 +8,7 @@ use crate::mqtt::MqttPublisher;
 
 mod config;
 mod mqtt;
+mod models;
 
 fn read_and_forward_stream<R: Read>(
     mut reader: R,
