@@ -2,10 +2,9 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
 pub enum LogLevel {
-    Debug = 1,
-    Info = 2,
-    Warning = 3,
-    Error = 4,
+    Info = 1,
+    Warning = 2,
+    Error = 3,
 }
 
 impl LogLevel {
