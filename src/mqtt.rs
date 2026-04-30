@@ -1,8 +1,9 @@
 use crate::models::log_level::LogLevel;
 use crate::models::log::Log;
 use crate::config::MqttConfig;
-use rumqttc::{Client, MqttOptions, QoS, RecvTimeoutError};
+use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -16,11 +17,37 @@ impl MqttPublisher {
     }
 
     pub fn new(config: MqttConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let username = config.username.clone();
+        let password = config.password.clone();
+        let use_tls = config.tls;
+
+        eprintln!("[MQTT] Attempting to establish connection to {}:{}", config.host, config.port);
+        
+        if let Some(ref user) = username {
+            eprintln!("[MQTT] Using credentials - username: {}", user);
+        }
+        
+        eprintln!("[MQTT] TLS: {}", use_tls);
+
         let mut mqtt_options = MqttOptions::new(&config.client_id, &config.host, config.port);
         mqtt_options.set_keep_alive(Duration::from_secs(30));
 
-        let (client, mut connection) = Client::new(mqtt_options, 100);
+        if use_tls {
+            eprintln!("[MQTT] Configuring TLS");
+            mqtt_options.set_transport(Transport::Tls(rumqttc::TlsConfiguration::default()));
+        }
+
+        if let Some(user) = username {
+            mqtt_options.set_credentials(user, password.unwrap_or_default());
+        }
+
+        eprintln!("[MQTT] Creating client...");
+
+        let (client, connection) = Client::new(mqtt_options, 100);
         let (sender, receiver) = mpsc::channel::<String>();
+        
+        let connected = Arc::new(Mutex::new(false));
+        let connected_for_wait = connected.clone();
 
         let topic = config.topic;
         let qos = match config.qos {
@@ -29,8 +56,16 @@ impl MqttPublisher {
             _ => QoS::ExactlyOnce,
         };
 
+        eprintln!("[MQTT] Spawning event loop...");
+        
+        // Spawn the event loop in a separate thread
         thread::spawn(move || {
+            eprintln!("[MQTT] Event loop: connection handler started");
+            
+            let mut connection = connection;
+            
             loop {
+                // Handle all pending messages from the queue
                 while let Ok(message) = receiver.try_recv() {
                     let log = Log {
                         timestamp: chrono::Utc::now(),
@@ -41,22 +76,55 @@ impl MqttPublisher {
 
                     let json_str = log.generate_payload();
 
-                    if let Err(err) = client.publish(&topic, qos, false, json_str) {
-                        eprintln!("MQTT publish error: {err}");
+                    match client.publish(&topic, qos, false, json_str) {
+                        Ok(_) => {},
+                        Err(err) => eprintln!("[MQTT] Publish error: {err}"),
                     }
                 }
 
-                match connection.recv_timeout(Duration::from_millis(100)) {
-                    Ok(_) => {}
+                // Poll for connection events with timeout
+                match connection.recv_timeout(Duration::from_secs(2)) {
+                    Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::ConnAck(_)))) => {
+                        eprintln!("[MQTT] Connected!");
+                        let mut state = connected_for_wait.lock().unwrap();
+                        *state = true;
+                    }
+                    Ok(Ok(_event)) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("[MQTT] Connection event error: {:?}", e);
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => {
-                        eprintln!("MQTT connection error: disconnected");
+                        eprintln!("[MQTT] Connection lost!");
                         break;
                     }
                 }
             }
         });
 
+        // Wait for connection acknowledgement
+        eprintln!("[MQTT] Waiting for broker acknowledgement...");
+        
+        for attempt in 1..=60 {
+            thread::sleep(Duration::from_millis(500));
+            let is_connected = {
+                let state = connected.lock().unwrap();
+                *state
+            };
+            
+            if is_connected {
+                eprintln!("[MQTT] Successfully connected to broker!");
+                return Ok(Self { sender });
+            }
+            
+            if attempt % 6 == 0 {
+                eprintln!("[MQTT] Still waiting... ({} seconds)", attempt / 2);
+            }
+        }
+
+        eprintln!("[MQTT] WARNING: No connection ACK received");
+        eprintln!("[MQTT] Proceeding anyway - will queue messages");
+        
         Ok(Self { sender })
     }
 

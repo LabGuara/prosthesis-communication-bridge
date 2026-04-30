@@ -7,6 +7,9 @@ pub struct MqttConfig {
     pub topic: String,
     pub qos: i32,
     pub client_id: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub tls: bool,
 }
 
 impl MqttConfig {
@@ -14,20 +17,35 @@ impl MqttConfig {
         dotenv::dotenv().ok();
         
         Self {
-            host: env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            host: env::var("MQTT_HOST")
+                .unwrap_or_else(|_| "localhost".to_string()),
+
             port: env::var("MQTT_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1883),
-            topic: env::var("MQTT_RAW_TOPIC").unwrap_or_else(|_| "prothesis/logs/raw".to_string()),
+
+            topic: env::var("MQTT_RAW_TOPIC")
+                .unwrap_or_else(|_| "prothesis/logs/raw".to_string()),
+
             qos: env::var("MQTT_QOS")
                 .ok()
                 .and_then(|q| q.parse().ok())
                 .unwrap_or(1),
+
             client_id: {
                 let base = env::var("MQTT_CLIENT_ID").unwrap_or_else(|_| "prothesis-logger-wrapper".to_string());
                 format!("{}-{}", base, std::process::id())
             },
+
+            username: env::var("MQTT_USERNAME").ok(),
+            
+            password: env::var("MQTT_PASSWORD").ok(),
+            
+            tls: env::var("MQTT_TLS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 }
