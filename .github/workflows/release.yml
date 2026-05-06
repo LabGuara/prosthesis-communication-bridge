@@ -1,0 +1,56 @@
+name: Build Raspberry Pi Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: aarch64-unknown-linux-gnu
+      ARTIFACT_NAME: prothesis-logger-wrapper-linux-aarch64
+      BINARY_NAME: prothesis-logger-wrapper
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target "${TARGET}"
+
+      - name: Package release asset
+        run: |
+          set -eu
+          staging_dir="$(mktemp -d)"
+          install -m 755 "target/${TARGET}/release/${BINARY_NAME}" "${staging_dir}/${BINARY_NAME}"
+          tar -C "${staging_dir}" -czf "${ARTIFACT_NAME}.tar.gz" "${BINARY_NAME}"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: build-${{ github.run_number }}
+          generate_release_notes: true
+          files: |
+            prothesis-logger-wrapper-linux-aarch64.tar.gz
