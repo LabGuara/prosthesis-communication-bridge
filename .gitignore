@@ -1,3 +1,5 @@
 /target
 
 .env
+/deploy/pi/__pycache__/
+/deploy/pi/*.pyc
