@@ -19,6 +19,15 @@
       ]
     },
     {
+      "name": "Debug updater 'update-binary.py'",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/deploy/pi/update-binary.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/deploy/pi/.env"
+    },
+    {
       "name": "Debug unit tests in executable 'prothesis-logger-wrapper'",
       "type": "lldb",
       "request": "launch",

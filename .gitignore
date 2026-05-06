@@ -1,4 +1,5 @@
 /target
+/build
 
 .env
 /deploy/pi/__pycache__/

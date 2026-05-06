@@ -1,0 +1,22 @@
+[Unit]
+Description=Prothesis logger wrapper
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=prothesis
+Group=prothesis
+WorkingDirectory=/opt/prothesis-logger-wrapper/current
+EnvironmentFile=-/etc/prothesis-logger-wrapper.env
+# Adjust the child executable path and arguments to match the prothesis app.
+ExecStart=/opt/prothesis-logger-wrapper/current/prothesis-logger-wrapper /opt/prothesis/current/prothesis
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
