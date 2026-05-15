@@ -5,7 +5,13 @@ edition = "2024"
 
 [dependencies]
 dotenv = "0.15.0"
-rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls"] }
 serde_json = "1.0.149"
 tokio = "1.52.1"
 chrono = "0.4.42"
+
+# 1. Bring back standard rumqttc (let it pull what it wants natively)
+rumqttc = { version = "0.25.1" }
+
+# 2. Force 'ring' to be enabled globally for rustls
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }

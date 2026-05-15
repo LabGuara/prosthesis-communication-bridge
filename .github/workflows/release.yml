@@ -25,16 +25,18 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      # 1. Install just the basic ARM cross-compiler for the final linking stage
+      # 1. Install the base cross-linker for the final linking stage
       - name: Install Cross Toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # 2. Build via standard Cargo using the ring cryptographic backend
+      # 2. Build via native Cargo. 
+      # We force CC=true to block any accidental native host C compilations.
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
         run: cargo build --release --target "${TARGET}"
 
       - name: Package release asset

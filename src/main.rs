@@ -97,6 +97,8 @@ fn run() -> io::Result<i32> {
 }
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    
     match run() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
