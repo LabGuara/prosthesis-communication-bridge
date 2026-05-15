@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TARGET: aarch64-unknown-linux-musl
-      ARTIFACT_NAME: prothesis-logger-linux-aarch64
-      BINARY_NAME: prothesis-logger
+      ARTIFACT_NAME: prothesis-logger-wrapper-linux-aarch64
+      BINARY_NAME: prothesis-logger-wrapper
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,14 +28,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cross toolchain
+      - name: Install cross toolchain and musl tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
 
       - name: Build release binary
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target "${TARGET}"
 
       - name: Package release asset
@@ -53,4 +53,4 @@ jobs:
           name: build-${{ github.run_number }}
           generate_release_notes: true
           files: |
-            prothesis-logger-linux-aarch64.tar.gz
+            prothesis-logger-wrapper-linux-aarch64.tar.gz
