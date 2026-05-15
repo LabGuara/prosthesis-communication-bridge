@@ -25,17 +25,27 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
+      # 1. Install standard cross-compilers
+      - name: Install Cross Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # 2. Inject the native musl-compile target layers perfectly
+      - name: Setup Musl Environment
+        uses: crossbeam-rs/setup-musl@v1
+        with:
+          target: ${{ env.env.TARGET }}
+
+      # Clean cache layers specifically if they cause hiccups
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      # 1. Install the Cross compilation engine
-      - name: Install Cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      # 2. Build using cross instead of cargo. 
-      # This completely isolates the C toolchain inside Docker.
+      # 3. Compile directly via native Cargo using the correct cross-linkers
       - name: Build release binary
-        run: cross build --release --target "${TARGET}"
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target "${TARGET}"
 
       - name: Package release asset
         run: |
