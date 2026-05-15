@@ -88,7 +88,7 @@ fn run() -> io::Result<i32> {
 
     let stderr_result = stderr_thread
         .join()
-        .map_err(|_| io::Error::other("stderr thread panicked"))?;
+        .map_err(|_| io::Error::other("stderr thread panicked "))?;
 
     stdout_result?;
     stderr_result?;
@@ -98,7 +98,7 @@ fn run() -> io::Result<i32> {
 
 fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    
+
     match run() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
