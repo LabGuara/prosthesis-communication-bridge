@@ -25,26 +25,20 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      # 1. Install standard cross-compilers
+      # 1. Install standard cross-compilers AND native musl tools
       - name: Install Cross Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
 
-      # 2. Inject the native musl-compile target layers perfectly
-      - name: Setup Musl Environment
-        uses: crossbeam-rs/setup-musl@v1
-        with:
-          target: ${{ env.env.TARGET }}
+      # Note: We intentionally left out the 'rust-cache' step here to clear out 
+      # the corrupted host/target GLIBC files that broke your previous runs.
 
-      # Clean cache layers specifically if they cause hiccups
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      # 3. Compile directly via native Cargo using the correct cross-linkers
+      # 2. Build directly. We point the MUSL target to use the 64-bit ARM compiler toolchain
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
         run: cargo build --release --target "${TARGET}"
 
       - name: Package release asset
