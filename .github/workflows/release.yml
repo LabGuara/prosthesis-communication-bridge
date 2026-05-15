@@ -25,20 +25,16 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      # 1. Install standard cross-compilers AND native musl tools
+      # 1. Install just the basic ARM cross-compiler for the final linking stage
       - name: Install Cross Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # Note: We intentionally left out the 'rust-cache' step here to clear out 
-      # the corrupted host/target GLIBC files that broke your previous runs.
-
-      # 2. Build directly. We point the MUSL target to use the 64-bit ARM compiler toolchain
+      # 2. Build via standard Cargo using the ring cryptographic backend
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
         run: cargo build --release --target "${TARGET}"
 
       - name: Package release asset
