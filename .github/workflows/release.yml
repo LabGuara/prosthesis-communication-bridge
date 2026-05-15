@@ -25,19 +25,18 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      # 1. Install the base cross-linker for the final linking stage
-      - name: Install Cross Toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      # 1. Install Zig toolchain natively on the runner
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
 
-      # 2. Build via native Cargo. 
-      # We force CC=true to block any accidental native host C compilations.
+      # 2. Install cargo-zigbuild tool 
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      # 3. Compile seamlessly via zigbuild!
+      # Zig automatically links and sets up the correct headers for the musl universe
       - name: Build release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
-        run: cargo build --release --target "${TARGET}"
+        run: cargo zigbuild --release --target "${TARGET}"
 
       - name: Package release asset
         run: |
