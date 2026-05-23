@@ -5,20 +5,26 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_FILE="$SCRIPT_DIR/prothesis-logger-wrapper.service"
 UPDATE_SCRIPT="$SCRIPT_DIR/update-binary.py"
+MAIN_PROTHESIS_EXECUTABLE="prothesis-mock.sh"
+ENVIRONMENT_FILE="/etc/prothesis-logger-wrapper.env"
 
 echo "Setting up prothesis-logger..."
+
+chmod +x "$SCRIPT_DIR/$MAIN_PROTHESIS_EXECUTABLE"
+
+cp "$SCRIPT_DIR/.env.example" "$ENVIRONMENT_FILE"
 
 # Copy and enable service
 echo "Setting up systemd service..."
 sudo cp "$SERVICE_FILE" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable prothesis-logger-wrapper
-echo "✓ Service enabled (will start on boot)"
+echo "Service enabled (will start on boot)"
 
 # Start the service now
 echo "Starting service..."
 sudo systemctl start prothesis-logger-wrapper
-echo "✓ Service started"
+echo "Service started"
 
 # Set up cron job for the prothesis user
 echo "Setting up cron job..."
@@ -27,7 +33,7 @@ CRON_SCHEDULE="* * * * * python3 $UPDATE_SCRIPT >> /var/log/prothesis-logger-upd
 # Remove old cron job if it exists and add new one (updates if already exists)
 (sudo crontab -u prothesis -l 2>/dev/null || echo "") | grep -v "$UPDATE_SCRIPT" | sudo crontab -u prothesis -
 (sudo crontab -u prothesis -l 2>/dev/null; echo "$CRON_SCHEDULE") | sudo crontab -u prothesis -
-echo "✓ Cron job added/updated (runs every minute)"
+echo "Cron job added/updated"
 
 # Create log directory
 echo "Creating log directory..."
@@ -36,7 +42,7 @@ sudo touch /var/log/prothesis-logger-update.log
 sudo chown prothesis:prothesis /var/log/prothesis-logger-update.log
 
 echo ""
-echo "✓ Setup complete!"
+echo "Setup complete!"
 echo ""
 echo "Verify with:"
 echo "  sudo systemctl status prothesis-logger-wrapper"
