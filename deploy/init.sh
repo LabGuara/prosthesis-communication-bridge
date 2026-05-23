@@ -22,17 +22,12 @@ echo "✓ Service started"
 
 # Set up cron job for the prothesis user
 echo "Setting up cron job..."
-CRON_SCHEDULE="0 2 * * * python3 $UPDATE_SCRIPT >> /var/log/prothesis-logger-update.log 2>&1"
+CRON_SCHEDULE="* * * * * python3 $UPDATE_SCRIPT >> /var/log/prothesis-logger-update.log 2>&1"
 
-# Check if cron job already exists
-if sudo crontab -u prothesis -l 2>/dev/null | grep -q "$UPDATE_SCRIPT"; then
-    echo "✓ Cron job already exists"
-else
-    # Add cron job
-    (sudo crontab -u prothesis -l 2>/dev/null || echo "") | grep -v "$UPDATE_SCRIPT" | sudo crontab -u prothesis -
-    (sudo crontab -u prothesis -l 2>/dev/null; echo "$CRON_SCHEDULE") | sudo crontab -u prothesis -
-    echo "✓ Cron job added (runs daily at 2 AM)"
-fi
+# Remove old cron job if it exists and add new one (updates if already exists)
+(sudo crontab -u prothesis -l 2>/dev/null || echo "") | grep -v "$UPDATE_SCRIPT" | sudo crontab -u prothesis -
+(sudo crontab -u prothesis -l 2>/dev/null; echo "$CRON_SCHEDULE") | sudo crontab -u prothesis -
+echo "✓ Cron job added/updated (runs every minute)"
 
 # Create log directory
 echo "Creating log directory..."
