@@ -25,6 +25,8 @@ fn read_and_forward_stream<R: Read>(
         }
 
         writeln!(destination, "{line}")?;
+        let a = "test";
+        writeln!(destination, "{a}")?;
         destination.flush()?;
     }
 
