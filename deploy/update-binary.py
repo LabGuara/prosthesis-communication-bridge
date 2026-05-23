@@ -40,7 +40,7 @@ load_env_file(Path(__file__).resolve().with_name(".env"))
 
 
 REPO = os.environ.get("REPO", "mateus-sartorio/prothesis-logger")
-INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "build"))
+INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prothesis-logger-wrapper"))
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "prothesis-logger")
 ASSET_NAME = os.environ.get("ASSET_NAME", "prothesis-logger-wrapper-linux-aarch64.tar.gz")
 GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com")

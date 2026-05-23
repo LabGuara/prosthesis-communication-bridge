@@ -9,7 +9,7 @@ User=prothesis
 Group=prothesis
 WorkingDirectory=/opt/prothesis-logger-wrapper/current
 EnvironmentFile=-/etc/prothesis-logger-wrapper.env
-ExecStart=/opt/prothesis-logger-wrapper/current/prothesis-logger-wrapper /opt/prothesis/current/prothesis
+ExecStart=/opt/prothesis-logger-wrapper/current/prothesis-logger-wrapper /opt/prothesis-logger-wrapper/current/prothesis-mock.sh
 Restart=always
 RestartSec=5
 

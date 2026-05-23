@@ -2,5 +2,5 @@
 /build
 
 .env
-/deploy/pi/__pycache__/
-/deploy/pi/*.pyc
+/deploy/__pycache__/
+/deploy/*.pyc
