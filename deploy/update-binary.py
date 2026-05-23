@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import json
 import os
 import tarfile
@@ -103,6 +104,10 @@ def main() -> int:
     installed_release_path.write_text(f"{release_tag}\n", encoding="utf-8")
 
     print(f"Downloaded and extracted {REPO}@{release_tag} to {release_dir}")
+
+    # Restart the service to pick up the new binary
+    subprocess.run(["systemctl", "restart", "prothesis-logger-wrapper"], check=True)
+
     return 0
 
 
