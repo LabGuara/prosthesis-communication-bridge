@@ -10,6 +10,14 @@ ENVIRONMENT_FILE="/etc/prothesis-logger-wrapper.env"
 
 echo "Setting up prothesis-logger..."
 
+# Ensure the deploy directory and files are readable by prothesis user
+echo "Setting permissions..."
+sudo chmod 755 "$SCRIPT_DIR"
+sudo chmod 644 "$UPDATE_SCRIPT"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    sudo chmod 644 "$SCRIPT_DIR/.env"
+fi
+
 chmod +x "$SCRIPT_DIR/$MAIN_PROTHESIS_EXECUTABLE"
 
 cp "$SCRIPT_DIR/.env.example" "$ENVIRONMENT_FILE"
