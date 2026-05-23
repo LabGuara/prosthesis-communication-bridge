@@ -5,8 +5,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=prothesis
-Group=prothesis
+User=root
+Group=root
 WorkingDirectory=/opt/prothesis-logger-wrapper/current
 EnvironmentFile=-/etc/prothesis-logger-wrapper.env
 ExecStart=/opt/prothesis-logger-wrapper/current/prothesis-logger-wrapper /opt/prothesis-logger-wrapper/current/prothesis-mock.sh
