@@ -9,7 +9,7 @@ use std::time::Duration;
 
 pub struct MqttPublisher {
     sender: Sender<String>,
-} 
+}
 
 impl MqttPublisher {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
