@@ -3,5 +3,5 @@
 while true
 do
     echo "hello"
-    sleep 1
+    sleep 2
 done
