@@ -1,7 +1,7 @@
 use std::env;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 use crate::mqtt::MqttPublisher;
@@ -31,8 +31,22 @@ fn read_and_forward_stream<R: Read>(
     Ok(())
 }
 
+fn forward_commands_to_child_stdin(
+    receiver: mpsc::Receiver<String>,
+    mut child_stdin: impl Write,
+) -> io::Result<()> {
+    for message in receiver {
+        writeln!(child_stdin, "{message}")?;
+        child_stdin.flush()?;
+    }
+
+    Ok(())
+}
+
 fn run() -> io::Result<i32> {
-    let publisher = match MqttPublisher::from_env() {
+    let (command_sender, command_receiver) = mpsc::channel::<String>();
+
+    let publisher = match MqttPublisher::from_env(command_sender) {
         Ok(publisher) => Some(Arc::new(publisher)),
         Err(err) => {
             eprintln!("MQTT init error: {err}");
@@ -51,10 +65,15 @@ fn run() -> io::Result<i32> {
 
     let mut child = Command::new(&executable)
         .args(&child_args)
-        .stdin(Stdio::inherit())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+
+    let child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture child stdin"))?;
 
     let stdout = child
         .stdout
@@ -80,6 +99,8 @@ fn run() -> io::Result<i32> {
         read_and_forward_stream(stderr, destination_lock, stderr_publisher)
     });
 
+    let stdin_thread = thread::spawn(move || forward_commands_to_child_stdin(command_receiver, child_stdin));
+
     let status = child.wait()?;
 
     let stdout_result = stdout_thread
@@ -90,8 +111,15 @@ fn run() -> io::Result<i32> {
         .join()
         .map_err(|_| io::Error::other("stderr thread panicked "))?;
 
+    drop(publisher);
+
+    let stdin_result = stdin_thread
+        .join()
+        .map_err(|_| io::Error::other("stdin thread panicked"))?;
+
     stdout_result?;
     stderr_result?;
+    stdin_result?;
 
     Ok(status.code().unwrap_or(1))
 }

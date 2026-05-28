@@ -4,7 +4,8 @@ use std::env;
 pub struct MqttConfig {
     pub host: String,
     pub port: u16,
-    pub topic: String,
+    pub logs_topic: String,
+    pub commands_topic: String,
     pub qos: i32,
     pub client_id: String,
     pub username: Option<String>,
@@ -25,8 +26,11 @@ impl MqttConfig {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1883),
 
-            topic: env::var("MQTT_RAW_TOPIC")
+            logs_topic: env::var("MQTT_LOGS_TOPIC")
                 .unwrap_or_else(|_| "prothesis/logs/raw".to_string()),
+
+            commands_topic: env::var("MQTT_COMMAND_LOGS_PARSED_TOPIC")
+                .unwrap_or_else(|_| "prothesis/actions/parsed".to_string()),
 
             qos: env::var("MQTT_QOS")
                 .ok()

@@ -23,7 +23,8 @@ The wrapper reads these variables from the environment or from a local `.env` fi
 
 - `MQTT_HOST`
 - `MQTT_PORT`
-- `MQTT_RAW_TOPIC`
+- `MQTT_LOGS_TOPIC`
+- `MQTT_COMMAND_LOGS_PARSED_TOPIC`
 - `MQTT_QOS`
 - `MQTT_CLIENT_ID`
 - `MQTT_USERNAME`

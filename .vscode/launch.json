@@ -9,10 +9,8 @@
         "args": ["run", "--bin=prothesis-logger-wrapper", "--"]
       },
       "args": [
-        "powershell.exe",
-        "-NoProfile",
-        "-Command",
-        "while ($true) { Write-Output 'hello'; Start-Sleep -Seconds 5 }"
+        "bash",
+        "./deploy/prothesis-mock.sh"
       ]
     },
     {

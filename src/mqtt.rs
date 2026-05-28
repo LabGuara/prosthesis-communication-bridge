@@ -12,11 +12,14 @@ pub struct MqttPublisher {
 }
 
 impl MqttPublisher {
-    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new(MqttConfig::from_env())
+    pub fn from_env(command_sender: Sender<String>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(MqttConfig::from_env(), command_sender)
     }
 
-    pub fn new(config: MqttConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        config: MqttConfig,
+        command_sender: Sender<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let username = config.username.clone();
         let password = config.password.clone();
         let use_tls = config.tls;
@@ -49,7 +52,8 @@ impl MqttPublisher {
         let connected = Arc::new(Mutex::new(false));
         let connected_for_wait = connected.clone();
 
-        let topic = config.topic;
+        let logs_topic = config.logs_topic;
+        let commands_topic = config.commands_topic;
         let qos = match config.qos {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
@@ -76,7 +80,7 @@ impl MqttPublisher {
 
                     let json_str = log.generate_payload();
 
-                    match client.publish(&topic, qos, false, json_str) {
+                    match client.publish(&logs_topic, qos, false, json_str) {
                         Ok(_) => {},
                         Err(err) => eprintln!("[MQTT] Publish error: {err}"),
                     }
@@ -88,6 +92,33 @@ impl MqttPublisher {
                         eprintln!("[MQTT] Connected!");
                         let mut state = connected_for_wait.lock().unwrap();
                         *state = true;
+
+                        // Subscribe to commands topic when connected
+                        match client.subscribe(&commands_topic, qos) {
+                            Ok(_) => eprintln!("[MQTT] Subscribed to commands topic: {}", commands_topic),
+                            Err(e) => eprintln!("[MQTT] Subscribe error: {:?}", e),
+                        }
+                    }
+                    Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
+                        if p.topic == commands_topic {
+                            match serde_json::from_slice::<serde_json::Value>(&p.payload) {
+                                Ok(value) => {
+                                    match value.get("message").and_then(|message| message.as_str()) {
+                                        Some(message) => {
+                                            if let Err(err) = command_sender.send(message.to_string()) {
+                                                eprintln!("[MQTT] Failed to forward command to stdin: {err}");
+                                            }
+                                        }
+                                        None => {
+                                            eprintln!("[MQTT] Incoming command payload missing string 'message' field");
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("[MQTT] Failed to parse command payload as JSON: {err}");
+                                }
+                            }
+                        }
                     }
                     Ok(Ok(_event)) => {}
                     Ok(Err(e)) => {
