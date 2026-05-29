@@ -10,8 +10,24 @@
       },
       "args": [
         "bash",
-        "./deploy/prothesis-mock.sh"
-      ]
+        "${workspaceFolder}/deploy/prothesis-mock.sh"
+      ],
+      "windows": {
+        "args": [
+          "powershell",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "${workspaceFolder}\\deploy\\prothesis-mock.ps1"
+        ]
+      },
+      "linux": {
+        "args": [
+          "bash",
+          "${workspaceFolder}/deploy/prothesis-mock.sh"
+        ]
+      }
     },
     {
       "name": "Debug updater 'update-binary.py'",
