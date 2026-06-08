@@ -2,24 +2,21 @@ use crate::models::log_level::LogLevel;
 use crate::models::log::Log;
 use crate::config::MqttConfig;
 use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 pub struct MqttPublisher {
-    sender: Sender<String>,
+    sender: mpsc::Sender<String>,
 }
 
 impl MqttPublisher {
-    pub fn from_env(command_sender: Sender<String>) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new(MqttConfig::from_env(), command_sender)
+    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(MqttConfig::from_env())
     }
 
-    pub fn new(
-        config: MqttConfig,
-        command_sender: Sender<String>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(config: MqttConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let username = config.username.clone();
         let password = config.password.clone();
         let use_tls = config.tls;
@@ -101,22 +98,23 @@ impl MqttPublisher {
                     }
                     Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
                         if p.topic == commands_topic {
-                            match serde_json::from_slice::<serde_json::Value>(&p.payload) {
-                                Ok(value) => {
-                                    match value.get("message").and_then(|message| message.as_str()) {
-                                        Some(message) => {
-                                            if let Err(err) = command_sender.send(message.to_string()) {
-                                                eprintln!("[MQTT] Failed to forward command to stdin: {err}");
-                                            }
-                                        }
-                                        None => {
-                                            eprintln!("[MQTT] Incoming command payload missing string 'message' field");
-                                        }
+                            eprintln!("[MQTT] Received command on topic. Forwarding binary 2 via TCP...");
+    
+                            // Attempt to open a TCP connection and send the binary value 2
+                            match std::net::TcpStream::connect("192.168.0.101:25000") {
+                                Ok(mut stream) => {
+                                    use std::io::Write;
+                                    
+                                    // This is the actual binary value 2 (1 byte: 0x02)
+                                    let binary_payload: [u8; 1] = [2]; 
+                                    
+                                    match stream.write_all(&binary_payload) {
+                                        Ok(_) => eprintln!("[TCP] Successfully sent binary 2 to 192.168.0.101:25000"),
+                                        Err(e) => eprintln!("[TCP] Failed to write data: {:?}", e),
                                     }
+                                    // Stream automatically drops and closes the connection here
                                 }
-                                Err(err) => {
-                                    eprintln!("[MQTT] Failed to parse command payload as JSON: {err}");
-                                }
+                                Err(e) => eprintln!("[TCP] Connection failed to 192.168.0.101:25000: {:?}", e),
                             }
                         }
                     }

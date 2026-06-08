@@ -1,7 +1,6 @@
-use std::env;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc};
+use std::io::{self, Read};
+use std::net::{TcpListener, UdpSocket};
+use std::sync::Arc;
 use std::thread;
 
 use crate::mqtt::MqttPublisher;
@@ -10,43 +9,75 @@ mod config;
 mod mqtt;
 mod models;
 
-fn read_and_forward_stream<R: Read>(
-    mut reader: R,
-    mut destination: impl Write,
-    publisher: Option<Arc<MqttPublisher>>,
-) -> io::Result<()> {
-    let buffered_reader = BufReader::new(&mut reader);
-
-    for line in buffered_reader.lines() {
-        let line = line?;
-
-        if let Some(publisher) = &publisher {
-            publisher.publish(&line);
+fn get_local_ip() -> String {
+    match UdpSocket::bind("0.0.0.0:0") {
+        Ok(socket) => {
+            if socket.connect("8.8.8.8:80").is_ok() {
+                socket.local_addr()
+                    .map(|addr| addr.ip().to_string())
+                    .unwrap_or_else(|_| "127.0.0.1".to_string())
+            } else {
+                "127.0.0.1".to_string()
+            }
         }
+        Err(_) => "127.0.0.1".to_string(),
+    }
+}
 
-        writeln!(destination, "{line}")?;
-        destination.flush()?;
+fn listen_for_tcp_commands(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
+    let listener = TcpListener::bind("0.0.0.0:25001")?;
+    let local_ip = get_local_ip();
+    println!("Listening for TCP commands on {}:25001", local_ip);
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut socket) => {
+                let mut buffer = [0; 1024];
+                while let Ok(n) = socket.read(&mut buffer) {
+                    if n == 0 { break; } // Connection closed by client
+                    let command = String::from_utf8_lossy(&buffer[..n]);
+                    println!("Received command: {}", command.trim());
+                    if let Some(ref pub_) = publisher {
+                        pub_.publish(command.trim());
+                    }
+                }
+            }
+            Err(e) => eprintln!("Connection failed: {e}"),
+        }
     }
 
     Ok(())
 }
 
-fn forward_commands_to_child_stdin(
-    receiver: mpsc::Receiver<String>,
-    mut child_stdin: impl Write,
-) -> io::Result<()> {
-    for message in receiver {
-        writeln!(child_stdin, "{message}")?;
-        child_stdin.flush()?;
+fn listen_for_tcp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
+    let listener = TcpListener::bind("0.0.0.0:25002")?;
+    let local_ip = get_local_ip();
+    println!("Listening for TCP logs on {}:25002", local_ip);
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut socket) => {
+                let mut buffer = [0; 1024];
+                match socket.read(&mut buffer) {
+                    Ok(n) => {
+                        let log = String::from_utf8_lossy(&buffer[..n]);
+                        println!("{}", log.trim());
+                        if let Some(ref pub_) = publisher {
+                            pub_.publish(log.trim());
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to read from socket: {e}"),
+                }
+            }
+            Err(e) => eprintln!("Connection failed: {e}"),
+        }
     }
 
     Ok(())
 }
 
 fn run() -> io::Result<i32> {
-    let (command_sender, command_receiver) = mpsc::channel::<String>();
-
-    let publisher = match MqttPublisher::from_env(command_sender) {
+    let publisher = match MqttPublisher::from_env() {
         Ok(publisher) => Some(Arc::new(publisher)),
         Err(err) => {
             eprintln!("MQTT init error: {err}");
@@ -54,74 +85,21 @@ fn run() -> io::Result<i32> {
         }
     };
 
-    let mut arguments = env::args().skip(1);
-    
-    let Some(executable) = arguments.next() else {
-        eprintln!("Usage: prothesis-logger <executable> [args...]");
-        return Ok(2);
-    };
+    let publisher_commands = publisher.clone();
+    let publisher_logs = publisher.clone();
 
-    let child_args: Vec<String> = arguments.collect();
+    let tcp_commands_thread = thread::spawn(move || listen_for_tcp_commands(publisher_commands));
+    let tcp_logs_thread = thread::spawn(move || listen_for_tcp_logs(publisher_logs));
 
-    let mut child = Command::new(&executable)
-        .args(&child_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture child stdin"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture child stdout"))?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture child stderr"))?;
-
-    let stdout_publisher = publisher.clone();
-    let stdout_thread = thread::spawn(move || {
-        let destination = io::stdout();
-        let destination_lock = destination.lock();
-        read_and_forward_stream(stdout, destination_lock, stdout_publisher)
-    });
-
-    let stderr_publisher = publisher.clone();
-    let stderr_thread = thread::spawn(move || {
-        let destination = io::stderr();
-        let destination_lock = destination.lock();
-        read_and_forward_stream(stderr, destination_lock, stderr_publisher)
-    });
-
-    let stdin_thread = thread::spawn(move || forward_commands_to_child_stdin(command_receiver, child_stdin));
-
-    let status = child.wait()?;
-
-    let stdout_result = stdout_thread
+    let _commands_result = tcp_commands_thread
         .join()
-        .map_err(|_| io::Error::other("stdout thread panicked"))?;
+        .map_err(|_| io::Error::other("TCP commands thread panicked"))?;
 
-    let stderr_result = stderr_thread
+    let _logs_result = tcp_logs_thread
         .join()
-        .map_err(|_| io::Error::other("stderr thread panicked "))?;
+        .map_err(|_| io::Error::other("TCP logs thread panicked"))?;
 
-    drop(publisher);
-
-    let stdin_result = stdin_thread
-        .join()
-        .map_err(|_| io::Error::other("stdin thread panicked"))?;
-
-    stdout_result?;
-    stderr_result?;
-    stdin_result?;
-
-    Ok(status.code().unwrap_or(1))
+    Ok(0)
 }
 
 fn main() {
