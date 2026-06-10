@@ -6,27 +6,7 @@
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "--bin=prothesis-logger-wrapper", "--"]
-      },
-      "args": [
-        "bash",
-        "${workspaceFolder}/deploy/prothesis-mock.sh"
-      ],
-      "windows": {
-        "args": [
-          "powershell",
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          "${workspaceFolder}\\deploy\\prothesis-mock.ps1"
-        ]
-      },
-      "linux": {
-        "args": [
-          "bash",
-          "${workspaceFolder}/deploy/prothesis-mock.sh"
-        ]
+        "args": ["run", "--bin=prothesis-logger-wrapper"]
       }
     },
     {
