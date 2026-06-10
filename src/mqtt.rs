@@ -98,23 +98,22 @@ impl MqttPublisher {
                     }
                     Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
                         if p.topic == commands_topic {
-                            eprintln!("[MQTT] Received command on topic. Forwarding binary 2 via TCP...");
-    
-                            // Attempt to open a TCP connection and send the binary value 2
-                            match std::net::TcpStream::connect("192.168.0.101:25000") {
-                                Ok(mut stream) => {
-                                    use std::io::Write;
-                                    
-                                    // This is the actual binary value 2 (1 byte: 0x02)
-                                    let binary_payload: [u8; 1] = [2]; 
-                                    
-                                    match stream.write_all(&binary_payload) {
-                                        Ok(_) => eprintln!("[TCP] Successfully sent binary 2 to 192.168.0.101:25000"),
-                                        Err(e) => eprintln!("[TCP] Failed to write data: {:?}", e),
+                            let payload_str = String::from_utf8_lossy(&p.payload);
+                            match payload_str.trim().parse::<u8>() {
+                                Ok(value) => {
+                                    eprintln!("[MQTT] Received command: {}. Forwarding via TCP...", value);
+                                    match std::net::TcpStream::connect("192.168.0.101:25000") {
+                                        Ok(mut stream) => {
+                                            use std::io::Write;
+                                            match stream.write_all(&[value]) {
+                                                Ok(_) => eprintln!("[TCP] Successfully sent {} to 192.168.0.101:25000", value),
+                                                Err(e) => eprintln!("[TCP] Failed to write data: {:?}", e),
+                                            }
+                                        }
+                                        Err(e) => eprintln!("[TCP] Connection failed to 192.168.0.101:25000: {:?}", e),
                                     }
-                                    // Stream automatically drops and closes the connection here
                                 }
-                                Err(e) => eprintln!("[TCP] Connection failed to 192.168.0.101:25000: {:?}", e),
+                                Err(e) => eprintln!("[MQTT] Failed to parse command payload {:?} as u8: {:?}", payload_str, e),
                             }
                         }
                     }
