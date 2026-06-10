@@ -44,24 +44,8 @@ echo "Starting service..."
 sudo systemctl start prothesis-logger-wrapper
 echo "Service started"
 
-# Set up cron job for root
-echo "Setting up cron job..."
-CRON_SCHEDULE="* * * * * python3 $UPDATE_SCRIPT >> /var/log/prothesis-logger-update.log 2>&1"
-
-# Remove old cron job if it exists and add new one (updates if already exists)
-(sudo crontab -u root -l 2>/dev/null || echo "") | grep -v "$UPDATE_SCRIPT" | sudo crontab -u root -
-(sudo crontab -u root -l 2>/dev/null; echo "$CRON_SCHEDULE") | sudo crontab -u root -
-echo "Cron job added/updated"
-
-# Create log directory
-echo "Creating log directory..."
-sudo mkdir -p /var/log
-sudo touch /var/log/prothesis-logger-update.log
-sudo chown root:root /var/log/prothesis-logger-update.log
-
 echo ""
 echo "Setup complete!"
 echo ""
 echo "Verify with:"
 echo "  sudo systemctl status prothesis-logger-wrapper"
-echo "  sudo crontab -u root -l"
