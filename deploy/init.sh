@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_FILE="$SCRIPT_DIR/prothesis-logger-wrapper.service"
 UPDATE_SCRIPT="$SCRIPT_DIR/update-binary.py"
-MAIN_PROTHESIS_EXECUTABLE="prothesis-mock.sh"
 ENVIRONMENT_FILE="/etc/prothesis-logger-wrapper.env"
 
 echo "Setting up prothesis-logger..."
@@ -19,8 +18,6 @@ sudo chmod 644 "$SCRIPT_DIR/.env.example"
 if [ -f "$SCRIPT_DIR/.env" ]; then
     sudo chmod 644 "$SCRIPT_DIR/.env"
 fi
-
-chmod +x "$SCRIPT_DIR/$MAIN_PROTHESIS_EXECUTABLE"
 
 cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
 cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
@@ -36,8 +33,6 @@ echo "Service enabled (will start on boot)"
 # Install the wrapper binary before starting the service.
 echo "Installing wrapper binary..."
 sudo python3 "$UPDATE_SCRIPT"
-sudo cp "$SCRIPT_DIR/$MAIN_PROTHESIS_EXECUTABLE" "/opt/prothesis-logger-wrapper/$MAIN_PROTHESIS_EXECUTABLE"
-sudo chmod 755 "/opt/prothesis-logger-wrapper/$MAIN_PROTHESIS_EXECUTABLE"
 
 # Start the service now
 echo "Starting service..."
