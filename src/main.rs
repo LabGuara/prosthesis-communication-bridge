@@ -61,7 +61,6 @@ fn listen_for_tcp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> 
                 match socket.read(&mut buffer) {
                     Ok(n) => {
                         let log = String::from_utf8_lossy(&buffer[..n]);
-                        println!("{}", log.trim());
                         if let Some(ref pub_) = publisher {
                             pub_.publish(log.trim());
                         }
