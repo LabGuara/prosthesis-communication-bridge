@@ -7,6 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Power command values received on the commands topic. Gait commands use
+/// values 1-9 and are forwarded via TCP; these power values are handled
+/// locally instead.
+const POWER_ON: u8 = 16;
+const POWER_OFF: u8 = 17;
+
+/// The MATLAB-generated control executable started/stopped by the power
+/// commands. In `ps` its process name shows up truncated as `RoboticLegContr`.
+const ROBOTIC_LEG_CONTROL_BIN: &str =
+    "/home/labguara/Resultados/MATLAB_ws/R2025b/RoboticLegControl2025b.elf";
+
 pub struct MqttPublisher {
     sender: mpsc::Sender<String>,
 }
@@ -100,6 +111,14 @@ impl MqttPublisher {
                         if p.topic == commands_topic {
                             let payload_str = String::from_utf8_lossy(&p.payload);
                             match payload_str.trim().parse::<u8>() {
+                                Ok(POWER_ON) => {
+                                    eprintln!("[CMD] Received power ON command. Starting RoboticLegControl...");
+                                    start_robotic_leg_control();
+                                }
+                                Ok(POWER_OFF) => {
+                                    eprintln!("[CMD] Received power OFF command. Stopping RoboticLegControl...");
+                                    stop_robotic_leg_control();
+                                }
                                 Ok(value) => {
                                     eprintln!("[MQTT] Received command: {}. Forwarding via TCP...", value);
                                     match std::net::TcpStream::connect("192.168.0.101:25000") {
@@ -159,6 +178,67 @@ impl MqttPublisher {
     pub fn publish(&self, message: &str) {
         if let Err(err) = self.sender.send(message.to_string()) {
             eprintln!("MQTT queue error: {err}");
+        }
+    }
+}
+
+/// Launch the RoboticLegControl executable (`sudo <bin>`) as a detached child.
+/// We intentionally do not wait on it: it is a long-running control loop that
+/// is later stopped by `stop_robotic_leg_control`.
+fn start_robotic_leg_control() {
+    match std::process::Command::new("sudo")
+        .arg(ROBOTIC_LEG_CONTROL_BIN)
+        .spawn()
+    {
+        Ok(child) => eprintln!(
+            "[CMD] Started RoboticLegControl (sudo pid {})",
+            child.id()
+        ),
+        Err(e) => eprintln!("[CMD] Failed to start RoboticLegControl: {:?}", e),
+    }
+}
+
+/// Find the running RoboticLegControl process(es) by command line and kill
+/// them. The executable is started via `sudo`, so it runs as root and must be
+/// killed with `sudo kill`.
+fn stop_robotic_leg_control() {
+    let output = match std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(ROBOTIC_LEG_CONTROL_BIN)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("[CMD] Failed to run pgrep to locate RoboticLegControl: {:?}", e);
+            return;
+        }
+    };
+
+    let pids: Vec<&str> = std::str::from_utf8(&output.stdout)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+
+    if pids.is_empty() {
+        eprintln!("[CMD] No running RoboticLegControl process found to stop");
+        return;
+    }
+
+    for pid in pids {
+        eprintln!("[CMD] Killing RoboticLegControl process (pid {})", pid);
+        match std::process::Command::new("sudo")
+            .arg("kill")
+            .arg(pid)
+            .status()
+        {
+            Ok(status) if status.success() => {
+                eprintln!("[CMD] Killed RoboticLegControl process (pid {})", pid)
+            }
+            Ok(status) => eprintln!(
+                "[CMD] kill for pid {} exited with status {:?}",
+                pid, status
+            ),
+            Err(e) => eprintln!("[CMD] Failed to kill pid {}: {:?}", pid, e),
         }
     }
 }
