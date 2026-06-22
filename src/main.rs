@@ -49,30 +49,23 @@ fn listen_for_tcp_commands(publisher: Option<Arc<MqttPublisher>>) -> io::Result<
     Ok(())
 }
 
-fn listen_for_tcp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:25002")?;
+fn listen_for_udp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:25002")?;
     let local_ip = get_local_ip();
-    println!("Listening for TCP logs on {}:25002", local_ip);
+    println!("Listening for UDP logs on {}:25002", local_ip);
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut socket) => {
-                let mut buffer = [0; 1024];
-                match socket.read(&mut buffer) {
-                    Ok(n) => {
-                        let log = String::from_utf8_lossy(&buffer[..n]);
-                        if let Some(ref pub_) = publisher {
-                            pub_.publish(log.trim());
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to read from socket: {e}"),
+    let mut buffer = [0; 1024];
+    loop {
+        match socket.recv_from(&mut buffer) {
+            Ok((n, _addr)) => {
+                let log = String::from_utf8_lossy(&buffer[..n]);
+                if let Some(ref pub_) = publisher {
+                    pub_.publish(log.trim());
                 }
             }
-            Err(e) => eprintln!("Connection failed: {e}"),
+            Err(e) => eprintln!("Failed to read from socket: {e}"),
         }
     }
-
-    Ok(())
 }
 
 fn run() -> io::Result<i32> {
@@ -88,15 +81,15 @@ fn run() -> io::Result<i32> {
     let publisher_logs = publisher.clone();
 
     let tcp_commands_thread = thread::spawn(move || listen_for_tcp_commands(publisher_commands));
-    let tcp_logs_thread = thread::spawn(move || listen_for_tcp_logs(publisher_logs));
+    let udp_logs_thread = thread::spawn(move || listen_for_udp_logs(publisher_logs));
 
     let _commands_result = tcp_commands_thread
         .join()
         .map_err(|_| io::Error::other("TCP commands thread panicked"))?;
 
-    let _logs_result = tcp_logs_thread
+    let _logs_result = udp_logs_thread
         .join()
-        .map_err(|_| io::Error::other("TCP logs thread panicked"))?;
+        .map_err(|_| io::Error::other("UDP logs thread panicked"))?;
 
     Ok(0)
 }
