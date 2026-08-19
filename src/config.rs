@@ -6,6 +6,7 @@ pub struct MqttConfig {
     pub port: u16,
     pub logs_topic: String,
     pub commands_topic: String,
+    pub power_feedback_topic: String,
     pub qos: i32,
     pub client_id: String,
     pub username: Option<String>,
@@ -31,6 +32,9 @@ impl MqttConfig {
 
             commands_topic: env::var("MQTT_COMMAND_LOGS_PARSED_TOPIC")
                 .unwrap_or_else(|_| "prothesis/actions/parsed".to_string()),
+
+            power_feedback_topic: env::var("MQTT_POWER_FEEDBACK_TOPIC")
+                .unwrap_or_else(|_| "prothesis/actions/feedback".to_string()),
 
             qos: env::var("MQTT_QOS")
                 .ok()

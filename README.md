@@ -25,6 +25,7 @@ The wrapper reads these variables from the environment or from a local `.env` fi
 - `MQTT_PORT`
 - `MQTT_LOGS_TOPIC`
 - `MQTT_COMMAND_LOGS_PARSED_TOPIC`
+- `MQTT_POWER_FEEDBACK_TOPIC`
 - `MQTT_QOS`
 - `MQTT_CLIENT_ID`
 - `MQTT_USERNAME`
@@ -32,6 +33,24 @@ The wrapper reads these variables from the environment or from a local `.env` fi
 - `MQTT_TLS`
 
 The Pi updater also accepts `GITHUB_TOKEN` for private repositories. Use a token that can read release metadata and download release assets from the repo.
+
+## Power commands
+
+Commands `16` (power on) and `17` (power off) on `MQTT_COMMAND_LOGS_PARSED_TOPIC` start and stop the `RoboticLegControl` executable instead of being forwarded over TCP. The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a command that is already satisfied is a no-op.
+
+Every power command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
+
+```json
+{
+  "timestamp": "2026-08-17T12:00:00+00:00",
+  "command": "power_on",
+  "status": "success",
+  "state": "on",
+  "message": "started RoboticLegControl (sudo pid 1234)"
+}
+```
+
+`status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
 
 ## Notes
 
