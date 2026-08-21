@@ -9,11 +9,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Power command values received on the commands topic. Gait commands use
-/// values 1-9 and are forwarded via TCP; these power values are handled
-/// locally instead.
+/// Power command values received on the commands topic. Every other value is a
+/// gait command, applied by restarting the control executable with the new gait
+/// mode.
 const POWER_ON: u8 = 16;
 const POWER_OFF: u8 = 17;
+
+/// Gait mode the control executable is started with until a gait command
+/// selects another one.
+const DEFAULT_GAIT_MODE: u8 = 1;
 
 /// The MATLAB-generated control executable started/stopped by the power
 /// commands. In `ps` its process name shows up truncated as `RoboticLegContr`.
@@ -90,7 +94,12 @@ impl MqttPublisher {
                 Ok(pids) if !pids.is_empty() => ProsthesisState::On,
                 _ => ProsthesisState::Off,
             };
-            eprintln!("[CMD] Initial prosthesis state: {}", prosthesis_state.as_str());
+            let mut gait_mode = DEFAULT_GAIT_MODE;
+            eprintln!(
+                "[CMD] Initial prosthesis state: {} (gait {})",
+                prosthesis_state.as_str(),
+                gait_mode
+            );
 
             loop {
                 // Handle all pending messages from the queue
@@ -129,13 +138,15 @@ impl MqttPublisher {
                             match payload_str.trim().parse::<u8>() {
                                 Ok(POWER_ON) => {
                                     eprintln!("[CMD] Received power ON command. Starting RoboticLegControl...");
-                                    let result = start_robotic_leg_control(&mut prosthesis_state);
+                                    let result =
+                                        start_robotic_leg_control(&mut prosthesis_state, gait_mode);
                                     publish_power_feedback(
                                         &client,
                                         &power_feedback_topic,
                                         qos,
                                         PowerCommand::On,
                                         prosthesis_state,
+                                        gait_mode,
                                         result,
                                     );
                                 }
@@ -148,21 +159,24 @@ impl MqttPublisher {
                                         qos,
                                         PowerCommand::Off,
                                         prosthesis_state,
+                                        gait_mode,
                                         result,
                                     );
                                 }
                                 Ok(value) => {
-                                    eprintln!("[MQTT] Received command: {}. Forwarding via TCP...", value);
-                                    match std::net::TcpStream::connect("192.168.0.101:25000") {
-                                        Ok(mut stream) => {
-                                            use std::io::Write;
-                                            match stream.write_all(&[value]) {
-                                                Ok(_) => eprintln!("[TCP] Successfully sent {} to 192.168.0.101:25000", value),
-                                                Err(e) => eprintln!("[TCP] Failed to write data: {:?}", e),
-                                            }
-                                        }
-                                        Err(e) => eprintln!("[TCP] Connection failed to 192.168.0.101:25000: {:?}", e),
-                                    }
+                                    eprintln!("[CMD] Received gait command: {}. Restarting RoboticLegControl...", value);
+                                    gait_mode = value;
+                                    let result =
+                                        restart_robotic_leg_control(&mut prosthesis_state, gait_mode);
+                                    publish_power_feedback(
+                                        &client,
+                                        &power_feedback_topic,
+                                        qos,
+                                        PowerCommand::SetGait,
+                                        prosthesis_state,
+                                        gait_mode,
+                                        result,
+                                    );
                                 }
                                 Err(e) => eprintln!("[MQTT] Failed to parse command payload {:?} as u8: {:?}", payload_str, e),
                             }
@@ -214,25 +228,27 @@ impl MqttPublisher {
     }
 }
 
-/// Publish the outcome of a power command on the feedback topic. `Ok` carries
-/// the success message, `Err` the failure reason; `state` is the power state
-/// the bridge holds after running the command.
+/// Publish the outcome of a power or gait command on the feedback topic. `Ok`
+/// carries the success message, `Err` the failure reason; `state` and `gait`
+/// are the power state and gait mode the bridge holds after running the
+/// command.
 fn publish_power_feedback(
     client: &Client,
     topic: &str,
     qos: QoS,
     command: PowerCommand,
     state: ProsthesisState,
+    gait: u8,
     result: Result<String, String>,
 ) {
     let feedback = match result {
         Ok(message) => {
             eprintln!("[CMD] {} succeeded: {}", command.as_str(), message);
-            PowerFeedback::success(command, state, message)
+            PowerFeedback::success(command, state, gait, message)
         }
         Err(message) => {
             eprintln!("[CMD] {} failed: {}", command.as_str(), message);
-            PowerFeedback::failure(command, state, message)
+            PowerFeedback::failure(command, state, gait, message)
         }
     };
 
@@ -259,17 +275,21 @@ fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Launch the RoboticLegControl executable (`sudo <bin>`) as a detached child.
-/// We intentionally do not wait on it: it is a long-running control loop that
-/// is later stopped by `stop_robotic_leg_control`. On success `state` is set to
-/// `On`; on failure it is left untouched.
-fn start_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, String> {
+/// Launch the RoboticLegControl executable (`sudo <bin> --gait=<gait_mode>`) as
+/// a detached child. We intentionally do not wait on it: it is a long-running
+/// control loop that is later stopped by `stop_robotic_leg_control`. On success
+/// `state` is set to `On`; on failure it is left untouched.
+fn start_robotic_leg_control(
+    state: &mut ProsthesisState,
+    gait_mode: u8,
+) -> Result<String, String> {
     if *state == ProsthesisState::On {
         return Ok("RoboticLegControl is already running".to_string());
     }
 
     let mut child = std::process::Command::new("sudo")
         .arg(ROBOTIC_LEG_CONTROL_BIN)
+        .arg(format!("--gait={}", gait_mode))
         .spawn()
         .map_err(|e| format!("failed to start RoboticLegControl: {:?}", e))?;
 
@@ -287,7 +307,10 @@ fn start_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Stri
         )),
         Ok(None) => {
             *state = ProsthesisState::On;
-            Ok(format!("started RoboticLegControl (sudo pid {})", pid))
+            Ok(format!(
+                "started RoboticLegControl with gait {} (sudo pid {})",
+                gait_mode, pid
+            ))
         }
         Err(e) => Err(format!(
             "failed to check whether RoboticLegControl (sudo pid {}) stayed alive: {:?}",
@@ -352,4 +375,16 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
         )),
         Err(e) => Err(format!("could not confirm RoboticLegControl was stopped: {}", e)),
     }
+}
+
+/// Apply a gait command: stop the control executable and start it again with
+/// the requested gait mode. A failure on the way stops the restart, leaving
+/// `state` at whatever the last successful step set it to.
+fn restart_robotic_leg_control(
+    state: &mut ProsthesisState,
+    gait_mode: u8,
+) -> Result<String, String> {
+    let stop_message = stop_robotic_leg_control(state)?;
+    let start_message = start_robotic_leg_control(state, gait_mode)?;
+    Ok(format!("{}; {}", stop_message, start_message))
 }
