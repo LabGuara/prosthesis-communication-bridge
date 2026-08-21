@@ -40,7 +40,7 @@ def load_env_file(path: Path) -> None:
 load_env_file(Path(__file__).resolve().with_name(".env"))
 
 
-REPO = os.environ.get("REPO", "mateus-sartorio/prosthesis-logger")
+REPO = os.environ.get("REPO", "mateus-sartorio/prosthesis-communication-bridge")
 INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prosthesis-logger-wrapper"))
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "prosthesis-logger")
 ASSET_NAME = os.environ.get("ASSET_NAME", "prosthesis-logger-wrapper-linux-aarch64.tar.gz")
