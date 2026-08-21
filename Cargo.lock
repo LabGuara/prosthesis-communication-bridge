@@ -335,7 +335,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "prothesis-logger-wrapper"
+name = "prosthesis-logger-wrapper"
 version = "0.1.0"
 dependencies = [
  "chrono",

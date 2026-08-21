@@ -1,5 +1,5 @@
 [Unit]
-Description=Prothesis logger wrapper
+Description=prosthesis logger wrapper
 Wants=network-online.target
 After=network-online.target
 
@@ -7,9 +7,9 @@ After=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/prothesis-logger-wrapper
-EnvironmentFile=-/etc/prothesis-logger-wrapper.env
-ExecStart=/opt/prothesis-logger-wrapper/prothesis-logger-wrapper
+WorkingDirectory=/opt/prosthesis-logger-wrapper
+EnvironmentFile=-/etc/prosthesis-logger-wrapper.env
+ExecStart=/opt/prosthesis-logger-wrapper/prosthesis-logger-wrapper
 Restart=always
 RestartSec=5
 

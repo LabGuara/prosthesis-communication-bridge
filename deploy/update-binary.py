@@ -40,17 +40,17 @@ def load_env_file(path: Path) -> None:
 load_env_file(Path(__file__).resolve().with_name(".env"))
 
 
-REPO = os.environ.get("REPO", "mateus-sartorio/prothesis-logger")
-INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prothesis-logger-wrapper"))
-SERVICE_NAME = os.environ.get("SERVICE_NAME", "prothesis-logger")
-ASSET_NAME = os.environ.get("ASSET_NAME", "prothesis-logger-wrapper-linux-aarch64.tar.gz")
+REPO = os.environ.get("REPO", "mateus-sartorio/prosthesis-logger")
+INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prosthesis-logger-wrapper"))
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "prosthesis-logger")
+ASSET_NAME = os.environ.get("ASSET_NAME", "prosthesis-logger-wrapper-linux-aarch64.tar.gz")
 GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 
 def github_headers(accept: str) -> dict[str, str]:
     headers = {
-        "User-Agent": "prothesis-logger-updater",
+        "User-Agent": "prosthesis-logger-updater",
         "Accept": accept,
     }
 
@@ -88,7 +88,7 @@ def main() -> int:
     release_dir = INSTALL_ROOT
     release_dir.mkdir(parents=True, exist_ok=True)
 
-    installed_release_path = release_dir / "prothesis-logger-release" 
+    installed_release_path = release_dir / "prosthesis-logger-release" 
     if installed_release_path.exists() and installed_release_path.read_text(encoding="utf-8").strip() == release_tag:
         print(f"Already at latest release: {release_tag}")
         return 0
@@ -106,7 +106,7 @@ def main() -> int:
     print(f"Downloaded and extracted {REPO}@{release_tag} to {release_dir}")
 
     # Restart the service to pick up the new binary
-    subprocess.run(["systemctl", "restart", "prothesis-logger-wrapper"], check=True)
+    subprocess.run(["systemctl", "restart", "prosthesis-logger-wrapper"], check=True)
 
     return 0
 

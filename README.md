@@ -1,21 +1,21 @@
-# prothesis-logger-wrapper
+# prosthesis-logger-wrapper
 
-This binary wraps the prothesis executable, forwards its stdout/stderr, and optionally publishes each log line to MQTT.
+This binary wraps the prosthesis executable, forwards its stdout/stderr, and optionally publishes each log line to MQTT.
 
 ## Deployment
 
 The first deployment path is GitHub Actions plus a Raspberry Pi update script.
 
 - The workflow in [.github/workflows/release.yml](.github/workflows/release.yml) builds a Linux `aarch64` release on every push to `main` and publishes a GitHub Release asset.
-- The Pi-side updater in [deploy/pi/update-wrapper.py](deploy/pi/update-wrapper.py) downloads the latest release asset, installs it under `/opt/prothesis-logger-wrapper`, updates a `current` symlink, and restarts systemd.
-- The systemd unit template in [deploy/pi/prothesis-logger-wrapper.service](deploy/pi/prothesis-logger-wrapper.service) is a starting point. Edit `ExecStart` so it launches the actual prothesis executable and arguments you want the wrapper to supervise.
+- The Pi-side updater in [deploy/pi/update-wrapper.py](deploy/pi/update-wrapper.py) downloads the latest release asset, installs it under `/opt/prosthesis-logger-wrapper`, updates a `current` symlink, and restarts systemd.
+- The systemd unit template in [deploy/pi/prosthesis-logger-wrapper.service](deploy/pi/prosthesis-logger-wrapper.service) is a starting point. Edit `ExecStart` so it launches the actual prosthesis executable and arguments you want the wrapper to supervise.
 
 ## Raspberry Pi setup
 
-1. Copy the systemd unit template to `/etc/systemd/system/prothesis-logger-wrapper.service`.
-2. Create `/etc/prothesis-logger-wrapper.env` with the MQTT settings you want on the Pi.
-3. Install the wrapper with `sudo REPO=your-org/prothesis-logger-wrapper python3 deploy/pi/update-wrapper.py`.
-4. Enable the service with `sudo systemctl enable --now prothesis-logger-wrapper`.
+1. Copy the systemd unit template to `/etc/systemd/system/prosthesis-logger-wrapper.service`.
+2. Create `/etc/prosthesis-logger-wrapper.env` with the MQTT settings you want on the Pi.
+3. Install the wrapper with `sudo REPO=your-org/prosthesis-logger-wrapper python3 deploy/pi/update-wrapper.py`.
+4. Enable the service with `sudo systemctl enable --now prosthesis-logger-wrapper`.
 
 ## Environment variables
 
@@ -55,4 +55,4 @@ Every power command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 ## Notes
 
 - The workflow currently targets Raspberry Pi OS 64-bit (`aarch64-unknown-linux-gnu`). If your Pi is running 32-bit OS, the target should be changed before relying on the release artifacts.
-- The updater keeps each release under a versioned directory and flips `/opt/prothesis-logger-wrapper/current` to the newest one.
+- The updater keeps each release under a versioned directory and flips `/opt/prosthesis-logger-wrapper/current` to the newest one.

@@ -107,7 +107,7 @@ impl MqttPublisher {
                     let log = Log {
                         timestamp: chrono::Utc::now(),
                         level: LogLevel::Info,
-                        sensor_name: "prothesis-logger".to_string(),
+                        sensor_name: "prosthesis-logger".to_string(),
                         message,
                     };
 

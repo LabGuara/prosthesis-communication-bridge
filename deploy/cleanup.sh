@@ -5,19 +5,19 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPDATE_SCRIPT="$SCRIPT_DIR/update-binary.py"
 
-echo "Stopping and removing prothesis-logger service..."
+echo "Stopping and removing prosthesis-logger service..."
 
 # Stop the service
 echo "Stopping service..."
-sudo systemctl stop prothesis-logger-wrapper
+sudo systemctl stop prosthesis-logger-wrapper
 
 # Disable the service (prevent it from starting on boot)
 echo "Disabling service..."
-sudo systemctl disable prothesis-logger-wrapper
+sudo systemctl disable prosthesis-logger-wrapper
 
 # Remove the service file
 echo "Removing service file..."
-sudo rm -f /etc/systemd/system/prothesis-logger-wrapper.service
+sudo rm -f /etc/systemd/system/prosthesis-logger-wrapper.service
 sudo systemctl daemon-reload
 
 # Remove the cron job

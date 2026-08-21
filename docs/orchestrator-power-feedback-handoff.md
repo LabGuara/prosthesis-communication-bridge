@@ -11,7 +11,7 @@ as it does today. What is new is that a reply always comes back.
 
 | | |
 | --- | --- |
-| Feedback topic | `prothesis/actions/feedback` (env `MQTT_POWER_FEEDBACK_TOPIC`) |
+| Feedback topic | `prosthesis/actions/feedback` (env `MQTT_POWER_FEEDBACK_TOPIC`) |
 | Direction | bridge → orchestrator |
 | QoS | same as the bridge's `MQTT_QOS` (default `1`) |
 | Retain | `false` |
@@ -20,7 +20,7 @@ as it does today. What is new is that a reply always comes back.
 
 ## Command side (unchanged, for reference)
 
-Commands arrive on `prothesis/actions/parsed` (env `MQTT_COMMAND_LOGS_PARSED_TOPIC`) as the
+Commands arrive on `prosthesis/actions/parsed` (env `MQTT_COMMAND_LOGS_PARSED_TOPIC`) as the
 ASCII decimal representation of a `u8`:
 
 | Value | Meaning | Handling |
@@ -144,8 +144,8 @@ Useful for log parsing and test fixtures. Again: display only, do not branch on 
 ## Deployment note
 
 `MQTT_POWER_FEEDBACK_TOPIC` must be the same string on both sides. The bridge defaults to
-`prothesis/actions/feedback` if the variable is unset. On the Pi it belongs in
-`/etc/prothesis-logger-wrapper.env`; the orchestrator should read it from its own
+`prosthesis/actions/feedback` if the variable is unset. On the Pi it belongs in
+`/etc/prosthesis-logger-wrapper.env`; the orchestrator should read it from its own
 configuration rather than hardcoding it.
 
 ## Known gaps — not in this version
@@ -165,7 +165,7 @@ Flagging these so the orchestrator design accounts for them rather than assuming
 
 | File | Change |
 | --- | --- |
-| `src/config.rs` | new `power_feedback_topic` field, env `MQTT_POWER_FEEDBACK_TOPIC`, default `prothesis/actions/feedback` |
+| `src/config.rs` | new `power_feedback_topic` field, env `MQTT_POWER_FEEDBACK_TOPIC`, default `prosthesis/actions/feedback` |
 | `src/models/prosthesis_state.rs` | new — `ProsthesisState::{On, Off}` |
 | `src/models/power_feedback.rs` | new — `PowerCommand`, `PowerFeedback`, JSON payload builder |
 | `src/mqtt.rs` | in-memory power state seeded from `pgrep`; `start`/`stop` return `Result<String, String>`; feedback published after every power command |

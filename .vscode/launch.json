@@ -2,11 +2,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug executable 'prothesis-logger-wrapper'",
+      "name": "Debug executable 'prosthesis-logger-wrapper'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "--bin=prothesis-logger-wrapper"]
+        "args": ["run", "--bin=prosthesis-logger-wrapper"]
       }
     },
     {
@@ -19,11 +19,11 @@
       "envFile": "${workspaceFolder}/deploy/pi/.env"
     },
     {
-      "name": "Debug unit tests in executable 'prothesis-logger-wrapper'",
+      "name": "Debug unit tests in executable 'prosthesis-logger-wrapper'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["test", "--bin=prothesis-logger-wrapper"]
+        "args": ["test", "--bin=prosthesis-logger-wrapper"]
       }
     }
   ]
