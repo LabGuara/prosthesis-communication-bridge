@@ -7,7 +7,7 @@ use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Power command values received on the commands topic. Every other value is a
 /// gait command, applied by restarting the control executable with the new gait
@@ -25,8 +25,15 @@ const ROBOTIC_LEG_CONTROL_BIN: &str =
     "/home/labguara/Resultados/MATLAB_ws/R2025b/RoboticLegControl2025b.elf";
 
 /// How long to wait before checking that a freshly spawned control process is
-/// still alive, and that killed processes are actually gone.
+/// still alive.
 const POWER_CHECK_DELAY: Duration = Duration::from_millis(500);
+
+/// How long to keep waiting for killed processes to actually go away, and how
+/// often to look in the meantime. `sudo kill` only asks the control executable
+/// to terminate: it shuts down on its own time and `sudo` only exits once it
+/// has, which regularly takes longer than a single short delay.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct MqttPublisher {
     sender: mpsc::Sender<String>,
@@ -356,25 +363,40 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
     }
 
     // A failed `kill` call is only a problem if the process survived it, so the
-    // end state is what decides success or failure here.
-    thread::sleep(POWER_CHECK_DELAY);
+    // end state is what decides success or failure here. Termination is not
+    // instant, so keep checking until the processes are gone or the timeout
+    // runs out rather than judging on a single look.
+    let deadline = Instant::now() + STOP_TIMEOUT;
 
-    match robotic_leg_control_pids() {
-        Ok(remaining) if remaining.is_empty() => {
-            *state = ProsthesisState::Off;
-            Ok(format!("stopped RoboticLegControl (pids {})", pids.join(", ")))
-        }
-        Ok(remaining) => Err(format!(
-            "RoboticLegControl is still running after kill (pids {}){}",
-            remaining.join(", "),
-            if kill_errors.is_empty() {
-                String::new()
-            } else {
-                format!(": {}", kill_errors.join("; "))
+    let survivors = loop {
+        thread::sleep(STOP_POLL_INTERVAL);
+
+        match robotic_leg_control_pids() {
+            Ok(remaining) if remaining.is_empty() => {
+                *state = ProsthesisState::Off;
+                return Ok(format!("stopped RoboticLegControl (pids {})", pids.join(", ")));
             }
-        )),
-        Err(e) => Err(format!("could not confirm RoboticLegControl was stopped: {}", e)),
-    }
+            Ok(remaining) if Instant::now() >= deadline => break remaining,
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!(
+                    "could not confirm RoboticLegControl was stopped: {}",
+                    e
+                ));
+            }
+        }
+    };
+
+    Err(format!(
+        "RoboticLegControl is still running {}s after kill (pids {}){}",
+        STOP_TIMEOUT.as_secs(),
+        survivors.join(", "),
+        if kill_errors.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", kill_errors.join("; "))
+        }
+    ))
 }
 
 /// Apply a gait command: stop the control executable and start it again with
