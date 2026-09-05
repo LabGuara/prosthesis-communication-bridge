@@ -4,6 +4,7 @@ use crate::models::power_feedback::{PowerCommand, PowerFeedback};
 use crate::models::prosthesis_state::ProsthesisState;
 use crate::config::MqttConfig;
 use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
+use std::io::{BufRead, BufReader};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -24,9 +25,33 @@ const DEFAULT_GAIT_MODE: u8 = 1;
 const ROBOTIC_LEG_CONTROL_BIN: &str =
     "/home/labguara/Resultados/MATLAB_ws/R2025b/RoboticLegControl2025b.elf";
 
-/// How long to wait before checking that a freshly spawned control process is
-/// still alive.
-const POWER_CHECK_DELAY: Duration = Duration::from_millis(500);
+/// While it runs, the control executable reports its input buffer on stdout as
+/// `Data bytes available <n>, out = 0.`. On a healthy prosthesis the buffer
+/// fills up, is read out once it reaches 52 bytes and drops back to 0, over and
+/// over. Every value on the way there is normal; a startup that never reaches
+/// 52, stalling at some other number instead, is a bad one and has to be
+/// restarted.
+const HEALTHY_DATA_BYTES: u64 = 52;
+
+/// How long to wait for the control executable to report the buffer at all.
+/// Everything it prints before that is initialization (CAN bus, maxon drives),
+/// which the startup check has no opinion about.
+const STARTUP_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the buffer is watched for `HEALTHY_DATA_BYTES` once the control
+/// executable started reporting it. This also doubles as the delay before
+/// checking that the freshly spawned process is still alive.
+const STARTUP_WATCH_WINDOW: Duration = Duration::from_secs(1);
+
+/// How many buffer reports have to be seen before a startup may be called bad,
+/// however long they took. The buffer only reaches `HEALTHY_DATA_BYTES` once
+/// every few reports, so condemning a startup on a couple of them would fail a
+/// healthy prosthesis that simply prints slower than usual.
+const STARTUP_MIN_REPORTS: u32 = 20;
+
+/// How many times the control executable is started before giving up on a
+/// healthy startup.
+const STARTUP_ATTEMPTS: u32 = 3;
 
 /// How long to keep waiting for killed processes to actually go away, and how
 /// often to look in the meantime. `sudo kill` only asks the control executable
@@ -283,9 +308,13 @@ fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
 }
 
 /// Launch the RoboticLegControl executable (`sudo <bin> --gait=<gait_mode>`) as
-/// a detached child. We intentionally do not wait on it: it is a long-running
-/// control loop that is later stopped by `stop_robotic_leg_control`. On success
-/// `state` is set to `On`; on failure it is left untouched.
+/// a detached child and make sure it actually came up: a start that does not
+/// report a healthy buffer size is killed and tried again, up to
+/// `STARTUP_ATTEMPTS` times. We intentionally do not wait on the control loop
+/// itself: it is long-running and is later stopped by
+/// `stop_robotic_leg_control`. On success `state` is set to `On`; when every
+/// attempt failed it is set to `Off`, since the last attempt is cleaned up
+/// before giving up.
 fn start_robotic_leg_control(
     state: &mut ProsthesisState,
     gait_mode: u8,
@@ -294,36 +323,206 @@ fn start_robotic_leg_control(
         return Ok("RoboticLegControl is already running".to_string());
     }
 
+    let mut failures: Vec<String> = Vec::new();
+
+    for attempt in 1..=STARTUP_ATTEMPTS {
+        match spawn_and_verify_robotic_leg_control(gait_mode) {
+            Ok(message) => {
+                *state = ProsthesisState::On;
+
+                return Ok(if failures.is_empty() {
+                    message
+                } else {
+                    format!("{} (after {})", message, failures.join("; "))
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "[CMD] RoboticLegControl startup attempt {}/{} failed: {}",
+                    attempt, STARTUP_ATTEMPTS, e
+                );
+                failures.push(format!("failed attempt {}: {}", attempt, e));
+
+                // Whatever is left of the failed attempt has to go before the
+                // next one, otherwise two control loops end up fighting over
+                // the hardware. `stop_robotic_leg_control` returns early when
+                // it is told the prosthesis is off, so give it a local `On`.
+                let mut leftover = ProsthesisState::On;
+
+                if let Err(stop_error) = stop_robotic_leg_control(&mut leftover) {
+                    eprintln!(
+                        "[CMD] Could not clean up after failed startup attempt {}: {}",
+                        attempt, stop_error
+                    );
+                    failures.push(format!("failed attempt {} cleanup: {}", attempt, stop_error));
+                }
+            }
+        }
+    }
+
+    *state = ProsthesisState::Off;
+
+    Err(format!(
+        "RoboticLegControl did not start up correctly in {} attempts: {}",
+        STARTUP_ATTEMPTS,
+        failures.join("; ")
+    ))
+}
+
+/// Start the control executable once and watch its stdout for the buffer size
+/// it reports. Its output keeps being forwarded to our own stdout for as long
+/// as it runs; only the beginning of it is inspected. Fails when the process
+/// dies right away or when the buffer never reaches `HEALTHY_DATA_BYTES`.
+fn spawn_and_verify_robotic_leg_control(gait_mode: u8) -> Result<String, String> {
     let mut child = std::process::Command::new("sudo")
         .arg(ROBOTIC_LEG_CONTROL_BIN)
         .arg(format!("--gait={}", gait_mode))
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start RoboticLegControl: {:?}", e))?;
 
     let pid = child.id();
 
-    // `spawn` only reports that the process was launched: `sudo` can still exit
-    // right away (missing binary, missing permission). Give it a moment and
-    // make sure it is still alive before reporting success.
-    thread::sleep(POWER_CHECK_DELAY);
+    let stdout = child.stdout.take().ok_or_else(|| {
+        format!(
+            "RoboticLegControl (sudo pid {}) was started without a stdout pipe",
+            pid
+        )
+    })?;
 
+    let (data_bytes, data_bytes_receiver) = mpsc::channel::<u64>();
+    thread::spawn(move || forward_robotic_leg_control_stdout(stdout, data_bytes));
+
+    let startup = watch_startup_data_bytes(&data_bytes_receiver);
+
+    // `spawn` only reports that the process was launched: `sudo` can still exit
+    // right away (missing binary, missing permission). The watch window already
+    // gave it a moment, so it is enough to look once, and a process that died
+    // explains a failed watch better than the watch itself does.
     match child.try_wait() {
-        Ok(Some(status)) => Err(format!(
-            "RoboticLegControl exited right after start with status {:?}",
-            status
-        )),
-        Ok(None) => {
-            *state = ProsthesisState::On;
-            Ok(format!(
-                "started RoboticLegControl with gait {} (sudo pid {})",
-                gait_mode, pid
-            ))
+        Ok(Some(status)) => {
+            return Err(format!(
+                "RoboticLegControl exited right after start with status {:?}",
+                status
+            ));
         }
-        Err(e) => Err(format!(
-            "failed to check whether RoboticLegControl (sudo pid {}) stayed alive: {:?}",
-            pid, e
-        )),
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "failed to check whether RoboticLegControl (sudo pid {}) stayed alive: {:?}",
+                pid, e
+            ));
+        }
     }
+
+    startup?;
+
+    // Nothing waits on the control loop from here on, so hand the child to a
+    // thread that reaps it whenever it eventually exits.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(format!(
+        "started RoboticLegControl with gait {} (sudo pid {}), buffer reaching {} bytes",
+        gait_mode, pid, HEALTHY_DATA_BYTES
+    ))
+}
+
+/// Judge a startup from the reported buffer sizes: healthy as soon as the
+/// buffer reaches `HEALTHY_DATA_BYTES`, bad once it has been reporting other
+/// sizes for `STARTUP_WATCH_WINDOW` without getting there. The clock only
+/// starts on the first report, so a slow initialization does not count against
+/// the prosthesis; not reporting at all within `STARTUP_STREAM_TIMEOUT` is a
+/// bad startup of its own.
+fn watch_startup_data_bytes(data_bytes: &mpsc::Receiver<u64>) -> Result<(), String> {
+    let stream_deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
+    let mut window_deadline: Option<Instant> = None;
+    let mut reports: u32 = 0;
+    let mut highest_seen: u64 = 0;
+
+    loop {
+        // The startup is only called bad once the watch window ran out *and*
+        // enough reports back that verdict up. Until then the overall timeout
+        // is what limits the wait, so a control loop that prints slowly gets
+        // its reports counted instead of being failed on the clock alone.
+        let deadline = match window_deadline {
+            Some(window) if reports >= STARTUP_MIN_REPORTS => window.min(stream_deadline),
+            _ => stream_deadline,
+        };
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+
+        if remaining.is_zero() {
+            break;
+        }
+
+        match data_bytes.recv_timeout(remaining) {
+            Ok(HEALTHY_DATA_BYTES) => return Ok(()),
+            Ok(size) => {
+                // The buffer is being reported now, so this is where the watch
+                // window actually begins.
+                window_deadline.get_or_insert_with(|| Instant::now() + STARTUP_WATCH_WINDOW);
+
+                reports += 1;
+                highest_seen = highest_seen.max(size);
+            }
+            // Either a deadline ran out or the process closed its stdout. Both
+            // are decided by what was seen so far.
+            Err(_) => break,
+        }
+    }
+
+    if reports == 0 {
+        return Err(format!(
+            "RoboticLegControl did not report its buffer at all within {}s",
+            STARTUP_STREAM_TIMEOUT.as_secs()
+        ));
+    }
+
+    Err(format!(
+        "RoboticLegControl buffer never reached {} bytes in {} reports (highest was {})",
+        HEALTHY_DATA_BYTES, reports, highest_seen
+    ))
+}
+
+/// Forward the control executable's stdout to our own, line by line, reporting
+/// every buffer size it prints on `data_bytes` along the way. The thread lives
+/// as long as the process does: once the startup check drops its receiver the
+/// sends fail silently and only the forwarding goes on.
+fn forward_robotic_leg_control_stdout(
+    stdout: std::process::ChildStdout,
+    data_bytes: mpsc::Sender<u64>,
+) {
+    for line in BufReader::new(stdout).lines() {
+        match line {
+            Ok(line) => {
+                println!("{}", line);
+
+                if let Some(size) = parse_data_bytes_available(&line) {
+                    let _ = data_bytes.send(size);
+                }
+            }
+            Err(e) => {
+                eprintln!("[CMD] Failed to read RoboticLegControl stdout: {:?}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// Read the `<n>` out of a `Data bytes available <n>, out = 0.` line. Every
+/// other line the control executable prints (its initialization text, for one)
+/// yields `None`. The report is looked up anywhere in the line, since the
+/// control executable does not always start a line for it.
+fn parse_data_bytes_available(line: &str) -> Option<u64> {
+    const REPORT_PREFIX: &str = "Data bytes available";
+
+    let start = line.find(REPORT_PREFIX)? + REPORT_PREFIX.len();
+    let rest = &line[start..];
+    let size = rest.split(',').next().unwrap_or(rest);
+
+    size.trim().parse().ok()
 }
 
 /// Find the running RoboticLegControl process(es) by command line and kill
