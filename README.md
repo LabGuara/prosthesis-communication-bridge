@@ -74,7 +74,7 @@ The watch only starts once the executable reports the buffer for the first time,
 
 There is one failure the check refuses to retry. When the actuators are switched off, the maxon drives never answer on the CAN bus and the executable gives up on them with `[maxon] no <n> NAO respondeu. O modelo vai rodar sem esse eixo.`, carrying on without the axis. The buffer can still reach 52 in that state, so a startup that only watched the buffer would call a prosthesis that cannot move healthy. As soon as such a line shows up the process is killed and the command answers `failure` right away: no amount of starting again switches the actuators on, so the remaining attempts are not spent on it.
 
-Any other bad start is killed and retried, up to 3 attempts. The power feedback message reports `success` on the first healthy start (naming the attempts that failed before it, if any) and `failure` with the reason of each attempt when all of them failed, leaving the prosthesis stopped.
+Any other bad start is killed and retried, up to 3 attempts. Killing means `SIGTERM` first, so the control executable gets to write its `.mat` file, and `SIGKILL` three seconds later if it is still there — a process that sits through `SIGTERM` must not be able to keep the prosthesis running. Every attempt logs what the cleanup did, including the case where it found nothing to kill. The power feedback message reports `success` on the first healthy start (naming the attempts that failed before it, if any) and `failure` with the reason of each attempt when all of them failed, leaving the prosthesis stopped.
 
 ## Stopping from the Pi
 
@@ -89,7 +89,7 @@ The wrapper handles three signals, and every one of them answers on the feedback
 
 | Signal | Sent by | What happens |
 | --- | --- | --- |
-| `SIGUSR1` | `stop-prosthesis` | Kills the control executable; the wrapper keeps running. |
+| `SIGUSR1` | `stop-prosthesis` | Kills the control executable (`SIGTERM`, then `SIGKILL` after 3s); the wrapper keeps running. |
 | `SIGINT` | Ctrl+C, when run in a terminal instead of under systemd | Kills the control executable, then exits. |
 | `SIGTERM` | `systemctl stop prosthesis-logger-wrapper` | Kills the control executable, then exits. |
 

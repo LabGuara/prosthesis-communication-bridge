@@ -71,6 +71,12 @@ const STARTUP_ATTEMPTS: u32 = 3;
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long `SIGTERM` is given before the same processes are sent `SIGKILL`.
+/// Asking is better for the control executable, which writes its `.mat` file on
+/// the way out, but a prosthesis that has to stop has to stop: asking is not
+/// allowed to be the last word.
+const KILL_ESCALATION_DELAY: Duration = Duration::from_secs(3);
+
 /// How long a signalled shutdown waits before exiting, so the MQTT event loop
 /// gets to put the last feedback message on the wire first.
 const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_secs(1);
@@ -662,12 +668,22 @@ fn start_robotic_leg_control(
                 // prosthesis is off, so give it a local `On`.
                 let mut leftover = ProsthesisState::On;
 
-                if let Err(stop_error) = stop_robotic_leg_control(&mut leftover) {
-                    eprintln!(
-                        "[CMD] Could not clean up after failed startup attempt {}: {}",
-                        attempt, stop_error
-                    );
-                    failures.push(format!("failed attempt {} cleanup: {}", attempt, stop_error));
+                match stop_robotic_leg_control(&mut leftover) {
+                    // Logged even when it found nothing to do: a cleanup that
+                    // quietly killed nothing is exactly the case worth seeing
+                    // in the journal.
+                    Ok(stop_message) => eprintln!(
+                        "[CMD] Cleaned up after failed startup attempt {}: {}",
+                        attempt, stop_message
+                    ),
+                    Err(stop_error) => {
+                        eprintln!(
+                            "[CMD] Could not clean up after failed startup attempt {}: {}",
+                            attempt, stop_error
+                        );
+                        failures
+                            .push(format!("failed attempt {} cleanup: {}", attempt, stop_error));
+                    }
                 }
 
                 if failure.is_fatal() {
@@ -718,6 +734,11 @@ fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String
     let (reports, reports_receiver) = mpsc::channel::<StartupReport>();
     thread::spawn(move || forward_robotic_leg_control_stdout(stdout, reports));
 
+    eprintln!(
+        "[CMD] Watching the startup of RoboticLegControl (sudo pid {}): its buffer has to reach {} bytes",
+        pid, HEALTHY_DATA_BYTES
+    );
+
     let startup = watch_startup(&reports_receiver);
 
     // `spawn` only reports that the process was launched: `sudo` can still exit
@@ -740,7 +761,19 @@ fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String
         }
     }
 
-    startup?;
+    if let Err(failure) = startup {
+        eprintln!("[CMD] {}", failure.message());
+
+        // Take the process down by the pid we already have. The sweep in
+        // `start_robotic_leg_control` runs afterwards and is what confirms it
+        // is gone, but the takedown itself must not depend on finding a
+        // process we already know the pid of.
+        for error in signal_control_pids(&[pid.to_string()], "TERM") {
+            eprintln!("[CMD] {}", error);
+        }
+
+        return Err(failure);
+    }
 
     // Nothing waits on the control loop from here on, so hand the child to a
     // thread that reaps it whenever it eventually exits.
@@ -897,54 +930,35 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
         return Ok("no running RoboticLegControl process found, already stopped".to_string());
     }
 
-    let mut kill_errors: Vec<String> = Vec::new();
-
-    for pid in &pids {
-        eprintln!("[CMD] Killing RoboticLegControl process (pid {})", pid);
-        match std::process::Command::new("sudo")
-            .arg("kill")
-            .arg(pid)
-            .status()
-        {
-            Ok(status) if status.success() => {
-                eprintln!("[CMD] Killed RoboticLegControl process (pid {})", pid)
-            }
-            Ok(status) => kill_errors.push(format!(
-                "kill for pid {} exited with status {:?}",
-                pid, status
-            )),
-            Err(e) => kill_errors.push(format!("failed to kill pid {}: {:?}", pid, e)),
-        }
-    }
-
     // A failed `kill` call is only a problem if the process survived it, so the
-    // end state is what decides success or failure here. Termination is not
-    // instant, so keep checking until the processes are gone or the timeout
-    // runs out rather than judging on a single look.
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    // end state is what decides success or failure here, not these errors.
+    let mut kill_errors = signal_control_pids(&pids, "TERM");
 
-    let survivors = loop {
-        thread::sleep(STOP_POLL_INTERVAL);
+    // Termination is not instant, so keep looking rather than judging on a
+    // single glance. Processes that sit through `SIGTERM` get `SIGKILL`: the
+    // point of this function is that the prosthesis ends up stopped.
+    let survivors = match wait_for_control_processes_to_exit(KILL_ESCALATION_DELAY)? {
+        None => Vec::new(),
+        Some(survivors) => {
+            eprintln!(
+                "[CMD] RoboticLegControl sat through SIGTERM for {}s, sending SIGKILL (pids {})",
+                KILL_ESCALATION_DELAY.as_secs(),
+                survivors.join(", ")
+            );
 
-        match robotic_leg_control_pids() {
-            Ok(remaining) if remaining.is_empty() => {
-                *state = ProsthesisState::Off;
-                return Ok(format!("stopped RoboticLegControl (pids {})", pids.join(", ")));
-            }
-            Ok(remaining) if Instant::now() >= deadline => break remaining,
-            Ok(_) => {}
-            Err(e) => {
-                return Err(format!(
-                    "could not confirm RoboticLegControl was stopped: {}",
-                    e
-                ));
-            }
+            kill_errors.extend(signal_control_pids(&survivors, "KILL"));
+
+            wait_for_control_processes_to_exit(STOP_TIMEOUT)?.unwrap_or_default()
         }
     };
 
+    if survivors.is_empty() {
+        *state = ProsthesisState::Off;
+        return Ok(format!("stopped RoboticLegControl (pids {})", pids.join(", ")));
+    }
+
     Err(format!(
-        "RoboticLegControl is still running {}s after kill (pids {}){}",
-        STOP_TIMEOUT.as_secs(),
+        "RoboticLegControl is still running after SIGTERM and SIGKILL (pids {}){}",
         survivors.join(", "),
         if kill_errors.is_empty() {
             String::new()
@@ -952,6 +966,63 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
             format!(": {}", kill_errors.join("; "))
         }
     ))
+}
+
+/// Send a signal to each pid with `sudo kill`, since the control executable
+/// runs as root. The returned strings are what went wrong, if anything;
+/// whether the processes actually went away is decided by looking for them
+/// afterwards, not by these exit statuses.
+fn signal_control_pids(pids: &[String], signal: &str) -> Vec<String> {
+    let mut errors: Vec<String> = Vec::new();
+
+    for pid in pids {
+        eprintln!(
+            "[CMD] Sending SIG{} to RoboticLegControl process (pid {})",
+            signal, pid
+        );
+
+        match std::process::Command::new("sudo")
+            .arg("kill")
+            .arg(format!("-{}", signal))
+            .arg(pid)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => errors.push(format!(
+                "kill -{} for pid {} exited with status {:?}",
+                signal, pid, status
+            )),
+            Err(e) => errors.push(format!(
+                "failed to send SIG{} to pid {}: {:?}",
+                signal, pid, e
+            )),
+        }
+    }
+
+    errors
+}
+
+/// Wait for every RoboticLegControl process to go away. `Ok(None)` means they
+/// are gone, `Ok(Some(pids))` the ones still standing when `timeout` ran out.
+fn wait_for_control_processes_to_exit(
+    timeout: Duration,
+) -> Result<Option<Vec<String>>, String> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        thread::sleep(STOP_POLL_INTERVAL);
+
+        let remaining = robotic_leg_control_pids()
+            .map_err(|e| format!("could not confirm RoboticLegControl was stopped: {}", e))?;
+
+        if remaining.is_empty() {
+            return Ok(None);
+        }
+
+        if Instant::now() >= deadline {
+            return Ok(Some(remaining));
+        }
+    }
 }
 
 /// Apply a gait or actuator current command: stop the control executable and
