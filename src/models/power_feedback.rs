@@ -9,6 +9,7 @@ pub enum PowerCommand {
     On,
     Off,
     SetGait,
+    SetActuatorCurrent,
 }
 
 impl PowerCommand {
@@ -17,6 +18,7 @@ impl PowerCommand {
             PowerCommand::On => "power_on",
             PowerCommand::Off => "power_off",
             PowerCommand::SetGait => "set_gait",
+            PowerCommand::SetActuatorCurrent => "set_actuator_current",
         }
     }
 }
@@ -30,6 +32,7 @@ pub struct PowerFeedback {
     pub success: bool,
     pub state: ProsthesisState,
     pub gait: u8,
+    pub current: u16,
     pub message: String,
 }
 
@@ -38,18 +41,20 @@ impl PowerFeedback {
         command: PowerCommand,
         state: ProsthesisState,
         gait: u8,
+        current: u16,
         message: String,
     ) -> Self {
-        Self { timestamp: Utc::now(), command, success: true, state, gait, message }
+        Self { timestamp: Utc::now(), command, success: true, state, gait, current, message }
     }
 
     pub fn failure(
         command: PowerCommand,
         state: ProsthesisState,
         gait: u8,
+        current: u16,
         message: String,
     ) -> Self {
-        Self { timestamp: Utc::now(), command, success: false, state, gait, message }
+        Self { timestamp: Utc::now(), command, success: false, state, gait, current, message }
     }
 
     pub fn generate_payload(&self) -> String {
@@ -59,6 +64,7 @@ impl PowerFeedback {
             "status": if self.success { "success" } else { "failure" },
             "state": self.state.as_str(),
             "gait": self.gait,
+            "current": self.current,
             "message": self.message,
         })
         .to_string()

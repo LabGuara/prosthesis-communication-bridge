@@ -1,0 +1,7 @@
+#!/bin/bash
+#
+# Follow the prosthesis bridge log: everything the wrapper prints plus the
+# stdout of the control executable it supervises. Extra arguments go straight
+# to journalctl, so `watch-prosthesis -n 200` works as expected.
+
+exec journalctl -u prosthesis-logger-wrapper -f "$@"

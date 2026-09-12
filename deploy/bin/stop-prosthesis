@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+# Ask the bridge to stop the prosthesis right now, without going through the
+# MQTT broker. The wrapper kills the control executable, answers on the MQTT
+# feedback topic and keeps running, so the prosthesis can be powered on again
+# from the server afterwards.
+
+set -e
+
+SERVICE="prosthesis-logger-wrapper"
+
+main_pid="$(systemctl show -p MainPID --value "$SERVICE")"
+
+if [ -z "$main_pid" ] || [ "$main_pid" -eq 0 ]; then
+    echo "$SERVICE is not running, so there is nothing to signal." >&2
+    exit 1
+fi
+
+# Signal the wrapper itself and nothing else. `systemctl kill` sends the signal
+# to every process in the unit by default, which includes sudo and the control
+# executable; SIGUSR1 terminates those outright, so the control executable
+# would be cut down where it stands instead of being shut down by the wrapper.
+if [ "$(id -u)" -eq 0 ]; then
+    kill -USR1 "$main_pid"
+else
+    sudo kill -USR1 "$main_pid"
+fi
+
+echo "Stop signal sent to $SERVICE (pid $main_pid)."
+echo "Follow what it did with: watch-prosthesis"

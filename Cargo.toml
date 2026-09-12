@@ -15,3 +15,8 @@ rumqttc = { version = "0.25.1" }
 # 2. Force 'ring' to be enabled globally for rustls
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+
+# Unix-only: the emergency-stop signal handler. Not built for other hosts, so
+# `cargo build` still works when developing off the Pi.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.4"
