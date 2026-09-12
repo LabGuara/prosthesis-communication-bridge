@@ -1,7 +1,105 @@
 #!/bin/bash
 #
-# Follow the prosthesis bridge log: everything the wrapper prints plus the
-# stdout of the control executable it supervises. Extra arguments go straight
-# to journalctl, so `watch-prosthesis -n 200` works as expected.
+# Follow the prosthesis bridge log with a stop key ready: everything the wrapper
+# prints plus the stdout of the control executable it supervises, with "s"
+# stopping the prosthesis on the spot and "q" leaving the log view.
+#
+# Extra arguments go to journalctl, so `watch-prosthesis -n 200` works. Pass
+# `--plain` to only follow the log without the stop key, which is what you want
+# when piping the output somewhere else.
 
-exec journalctl -u prosthesis-logger-wrapper -f "$@"
+set -u
+
+SERVICE="prosthesis-logger-wrapper"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Installed next to this script by init.sh; fall back to PATH otherwise.
+STOP_COMMAND="$SCRIPT_DIR/stop-prosthesis"
+if [ ! -x "$STOP_COMMAND" ]; then
+    STOP_COMMAND="stop-prosthesis"
+fi
+
+interactive=true
+journal_args=()
+
+for argument in "$@"; do
+    case "$argument" in
+        --plain | --no-interactive)
+            interactive=false
+            ;;
+        --interactive)
+            interactive=true
+            ;;
+        -h | --help)
+            echo "Usage: watch-prosthesis [--plain] [journalctl arguments...]"
+            echo
+            echo "Follows the $SERVICE log. While it runs:"
+            echo "  s   stop the prosthesis now (kills the control executable,"
+            echo "      publishes MQTT feedback, leaves the bridge running)"
+            echo "  q   quit the log view, leaving the prosthesis alone"
+            echo
+            echo "  --plain   only follow the log, no stop key (for pipes)"
+            exit 0
+            ;;
+        *)
+            journal_args+=("$argument")
+            ;;
+    esac
+done
+
+# Without a terminal there is nobody to press the key, and reading from a pipe
+# would swallow input meant for whatever is on the other end.
+if [ ! -t 0 ]; then
+    interactive=false
+fi
+
+if [ "$interactive" = false ]; then
+    exec journalctl -u "$SERVICE" -f "${journal_args[@]}"
+fi
+
+# Get the sudo password out of the way now, if one is needed at all: being asked
+# for it halfway through an emergency stop is the worst possible moment.
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "Authorising the stop key up front so it does not ask for a password later."
+    sudo -v
+fi
+
+echo "Following $SERVICE. Press 's' to stop the prosthesis, 'q' to quit."
+echo
+
+journalctl -u "$SERVICE" -f "${journal_args[@]}" &
+journal_pid=$!
+
+# A hard kill can leave the terminal with echo switched off, so put it back
+# whichever way this script ends.
+trap 'kill "$journal_pid" 2>/dev/null; stty echo 2>/dev/null' EXIT
+
+while kill -0 "$journal_pid" 2>/dev/null; do
+    key=""
+    read -rsn1 -t 1 key && status=0 || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        # Over 128 is the read timing out, which is just the loop ticking over
+        # so it can notice journalctl going away. Anything else means stdin is
+        # gone, and there is no key left to wait for.
+        if [ "$status" -le 128 ]; then
+            break
+        fi
+
+        continue
+    fi
+
+    case "$key" in
+        s | S)
+            echo
+            echo ">>> stopping the prosthesis..."
+
+            if ! "$STOP_COMMAND"; then
+                echo ">>> stop failed, see the log above" >&2
+            fi
+            ;;
+        q | Q)
+            break
+            ;;
+    esac
+done

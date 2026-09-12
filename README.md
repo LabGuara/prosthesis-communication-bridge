@@ -80,10 +80,10 @@ Any other bad start is killed and retried, up to 3 attempts. The power feedback 
 
 The prosthesis can be stopped without going through the broker, for when the leg is doing something it should not and reaching for the server is not an option. [deploy/init.sh](deploy/init.sh) installs two commands into `/usr/local/bin`, and [deploy/cleanup.sh](deploy/cleanup.sh) removes them again:
 
-- `watch-prosthesis` follows the service log — everything the wrapper prints plus the stdout of the control executable. Arguments are passed on to `journalctl`, so `watch-prosthesis -n 200` works.
+- `watch-prosthesis` follows the service log — everything the wrapper prints plus the stdout of the control executable — and keeps a stop key ready while it runs: **`s` stops the prosthesis**, `q` leaves the log view without touching it. Arguments are passed on to `journalctl`, so `watch-prosthesis -n 200` works; `--plain` drops the stop key and only follows the log, which is what you want when piping the output somewhere.
 - `stop-prosthesis` stops the prosthesis now. It sends `SIGUSR1` to the wrapper process, which kills the control executable and answers on `MQTT_POWER_FEEDBACK_TOPIC` like any other power command. The wrapper stays up, so the server can power the prosthesis on again afterwards. It signals the unit's `MainPID` directly rather than using `systemctl kill`, which would deliver the signal to every process in the unit: `SIGUSR1` terminates `sudo` and the control executable outright, so they would be cut down where they stand instead of being shut down by the wrapper.
 
-Note that a keyboard shortcut inside `watch-prosthesis` cannot do this: `journalctl` is only reading the log, and Ctrl+C or Ctrl+Z there reaches `journalctl`, never the service. Run `stop-prosthesis` from another terminal instead.
+The `s` key works because `watch-prosthesis` is a program in its own right: it runs `journalctl` in the background and reads the keyboard itself, so a key press becomes a signal to the service. Terminal shortcuts cannot do the same — Ctrl+C and Ctrl+Z reach whatever is in the foreground of that terminal, which is the log viewer, never the service. It asks for the sudo password up front, if one is needed at all, so the stop key does not stop to ask at the worst possible moment.
 
 The wrapper handles three signals, and every one of them answers on the feedback topic:
 
