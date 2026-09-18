@@ -5,7 +5,7 @@ use crate::models::prosthesis_state::ProsthesisState;
 use crate::config::MqttConfig;
 use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
 use std::io::{BufRead, BufReader};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -49,14 +49,23 @@ const HEALTHY_DATA_BYTES: u64 = 52;
 /// which the startup check has no opinion about.
 const STARTUP_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the buffer is watched for `HEALTHY_DATA_BYTES` once the control
-/// executable started reporting it. This also doubles as the delay before
-/// checking that the freshly spawned process is still alive.
+/// How long the buffer may go without reaching `HEALTHY_DATA_BYTES`, counted
+/// from the first report and then again from every time it does. A healthy
+/// prosthesis gets there every few reports, a few dozen milliseconds apart.
 const STARTUP_WATCH_WINDOW: Duration = Duration::from_secs(1);
 
-/// How many times the control executable is started before giving up on a
-/// healthy startup.
-const STARTUP_ATTEMPTS: u32 = 3;
+/// How long the buffer has to keep reaching `HEALTHY_DATA_BYTES` before a start
+/// counts as healthy. A single 52 proves nothing: on a prosthesis out of sync
+/// the buffer keeps growing instead of draining, and on its way up it passes
+/// through 52 once and moves on.
+const STARTUP_STABILIZATION: Duration = Duration::from_secs(3);
+
+/// Pause between a failed start and the next one, so the drives get a moment
+/// before being brought up again.
+const RESTART_DELAY: Duration = Duration::from_secs(1);
+
+/// How often a start in progress checks whether a newer command came in.
+const SUPERSEDE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// How long to keep waiting for killed processes to actually go away, and how
 /// often to look in the meantime. `sudo kill` only asks the control executable
@@ -75,30 +84,50 @@ const KILL_ESCALATION_DELAY: Duration = Duration::from_secs(3);
 /// gets to put the last feedback message on the wire first.
 const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_secs(1);
 
-/// Set while a stop signal is being handled. A start that is already in
-/// progress watches this and gives up, instead of bringing the prosthesis back
-/// up right after the signal killed it.
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Bumped for every command, whether it came over MQTT or as a stop signal. A
+/// start remembers the value it began under and gives up as soon as it changes:
+/// whatever came in since is what the operator wants now. A start retries
+/// until the prosthesis works, so without this nothing could ever get past one.
+static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Why a start attempt failed, and whether starting again could do better.
+/// Supersede whatever is still in progress, and hand out the generation the
+/// new command runs under.
+fn next_command_generation() -> u64 {
+    COMMAND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Whether a newer command came in since `generation` was handed out.
+fn superseded(generation: u64) -> bool {
+    COMMAND_GENERATION.load(Ordering::SeqCst) != generation
+}
+
+/// Why a start attempt failed, and what that means for the next one.
 enum StartFailure {
     /// The control loop came up, just not healthily. Another attempt may work.
     Retryable(String),
     /// Another attempt would fail in exactly the same way, because what the
     /// control loop is missing is not something a restart provides.
     Fatal(String),
+    /// A newer command came in, so there is no point in another attempt.
+    Superseded,
 }
 
 impl StartFailure {
     fn message(&self) -> &str {
         match self {
             StartFailure::Retryable(message) | StartFailure::Fatal(message) => message,
+            StartFailure::Superseded => "a newer command came in before it was done",
         }
     }
+}
 
-    fn is_fatal(&self) -> bool {
-        matches!(self, StartFailure::Fatal(_))
-    }
+/// What a command on the commands topic asks for.
+#[derive(Clone, Copy, Debug)]
+enum ControlCommand {
+    PowerOn,
+    PowerOff,
+    SetGait(u8),
+    SetActuatorCurrent(u16),
 }
 
 /// What the startup check picks out of the control executable's stdout.
@@ -239,6 +268,31 @@ impl MqttPublisher {
             move || listen_for_stop_signals(client, power_feedback_topic, qos, control_state)
         });
 
+        // Commands run on a thread of their own. A start retries until the
+        // prosthesis works, which can take any amount of time, and the MQTT
+        // connection only makes progress while the event loop below is polled:
+        // running commands there would stall it, and a power off could never
+        // arrive to stop a start that keeps failing.
+        let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand)>();
+
+        eprintln!("[CMD] Spawning command worker...");
+
+        thread::spawn({
+            let client = client.clone();
+            let power_feedback_topic = power_feedback_topic.clone();
+            let control_state = control_state.clone();
+
+            move || {
+                run_control_commands(
+                    commands_receiver,
+                    client,
+                    power_feedback_topic,
+                    qos,
+                    control_state,
+                )
+            }
+        });
+
         eprintln!("[MQTT] Spawning event loop...");
 
         // Spawn the event loop in a separate thread
@@ -281,91 +335,52 @@ impl MqttPublisher {
                     Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
                         if p.topic == commands_topic {
                             let payload_str = String::from_utf8_lossy(&p.payload);
-                            match payload_str.trim().parse::<u32>() {
-                                Ok(POWER_ON) => {
-                                    eprintln!("[CMD] Received power ON command. Starting RoboticLegControl...");
-                                    run_control_command(
-                                        &client,
-                                        &power_feedback_topic,
-                                        qos,
-                                        &control_state,
-                                        PowerCommand::On,
-                                        |state| {
-                                            let launch = state.launch();
 
-                                            start_robotic_leg_control(
-                                                &mut state.prosthesis,
-                                                launch,
-                                            )
-                                        },
-                                    );
-                                }
-                                Ok(POWER_OFF) => {
-                                    eprintln!("[CMD] Received power OFF command. Stopping RoboticLegControl...");
-                                    run_control_command(
-                                        &client,
-                                        &power_feedback_topic,
-                                        qos,
-                                        &control_state,
-                                        PowerCommand::Off,
-                                        |state| stop_robotic_leg_control(&mut state.prosthesis),
-                                    );
-                                }
+                            let command = match payload_str.trim().parse::<u32>() {
+                                Ok(POWER_ON) => Some(ControlCommand::PowerOn),
+                                Ok(POWER_OFF) => Some(ControlCommand::PowerOff),
                                 Ok(value) if (MIN_GAIT_MODE..=MAX_GAIT_MODE).contains(&value) => {
-                                    eprintln!("[CMD] Received gait command: {}. Restarting RoboticLegControl...", value);
-                                    run_control_command(
-                                        &client,
-                                        &power_feedback_topic,
-                                        qos,
-                                        &control_state,
-                                        PowerCommand::SetGait,
-                                        |state| {
-                                            state.gait = value as u8;
-                                            let launch = state.launch();
-
-                                            restart_robotic_leg_control(
-                                                &mut state.prosthesis,
-                                                launch,
-                                            )
-                                        },
-                                    );
+                                    Some(ControlCommand::SetGait(value as u8))
                                 }
                                 Ok(value)
                                     if (MIN_ACTUATOR_CURRENT..=MAX_ACTUATOR_CURRENT)
                                         .contains(&value) =>
                                 {
-                                    eprintln!("[CMD] Received actuator current command: {}. Restarting RoboticLegControl...", value);
-                                    run_control_command(
-                                        &client,
-                                        &power_feedback_topic,
-                                        qos,
-                                        &control_state,
-                                        PowerCommand::SetActuatorCurrent,
-                                        |state| {
-                                            state.current = value as u16;
-                                            let launch = state.launch();
-
-                                            restart_robotic_leg_control(
-                                                &mut state.prosthesis,
-                                                launch,
-                                            )
-                                        },
-                                    );
+                                    Some(ControlCommand::SetActuatorCurrent(value as u16))
                                 }
                                 // Restarting the prosthesis on a value nobody can make sense
                                 // of is worse than doing nothing, so unknown commands are
                                 // only logged.
-                                Ok(value) => eprintln!(
-                                    "[CMD] Ignoring unknown command {}: expected {}/{} (power), {}-{} (gait) or {}-{} (actuator current)",
-                                    value,
-                                    POWER_ON,
-                                    POWER_OFF,
-                                    MIN_GAIT_MODE,
-                                    MAX_GAIT_MODE,
-                                    MIN_ACTUATOR_CURRENT,
-                                    MAX_ACTUATOR_CURRENT,
-                                ),
-                                Err(e) => eprintln!("[MQTT] Failed to parse command payload {:?} as a number: {:?}", payload_str, e),
+                                Ok(value) => {
+                                    eprintln!(
+                                        "[CMD] Ignoring unknown command {}: expected {}/{} (power), {}-{} (gait) or {}-{} (actuator current)",
+                                        value,
+                                        POWER_ON,
+                                        POWER_OFF,
+                                        MIN_GAIT_MODE,
+                                        MAX_GAIT_MODE,
+                                        MIN_ACTUATOR_CURRENT,
+                                        MAX_ACTUATOR_CURRENT,
+                                    );
+                                    None
+                                }
+                                Err(e) => {
+                                    eprintln!("[MQTT] Failed to parse command payload {:?} as a number: {:?}", payload_str, e);
+                                    None
+                                }
+                            };
+
+                            if let Some(command) = command {
+                                // Supersede whatever is still in progress first, so a
+                                // start that keeps retrying lets go and the worker gets
+                                // to this command.
+                                let generation = next_command_generation();
+
+                                eprintln!("[CMD] Received {:?} (command #{})", command, generation);
+
+                                if let Err(e) = commands.send((generation, command)) {
+                                    eprintln!("[CMD] Command worker is gone, dropping {:?}: {:?}", command, e);
+                                }
                             }
                         }
                     }
@@ -415,6 +430,55 @@ impl MqttPublisher {
     }
 }
 
+/// Run the commands queued by the MQTT event loop, one at a time and in the
+/// order they came in, answering each on the feedback topic. `generation` is
+/// what lets a newer command cut short a start that is still retrying.
+fn run_control_commands(
+    commands: mpsc::Receiver<(u64, ControlCommand)>,
+    client: Client,
+    power_feedback_topic: String,
+    qos: QoS,
+    control_state: SharedControlState,
+) {
+    for (generation, command) in commands {
+        let feedback_command = match command {
+            ControlCommand::PowerOn => PowerCommand::On,
+            ControlCommand::PowerOff => PowerCommand::Off,
+            ControlCommand::SetGait(_) => PowerCommand::SetGait,
+            ControlCommand::SetActuatorCurrent(_) => PowerCommand::SetActuatorCurrent,
+        };
+
+        eprintln!("[CMD] Running {:?} (command #{})", command, generation);
+
+        run_control_command(
+            &client,
+            &power_feedback_topic,
+            qos,
+            &control_state,
+            feedback_command,
+            |state| match command {
+                ControlCommand::PowerOn => {
+                    let launch = state.launch();
+                    start_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                }
+                ControlCommand::PowerOff => stop_robotic_leg_control(&mut state.prosthesis),
+                ControlCommand::SetGait(gait) => {
+                    state.gait = gait;
+                    let launch = state.launch();
+                    restart_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                }
+                ControlCommand::SetActuatorCurrent(current) => {
+                    state.current = current;
+                    let launch = state.launch();
+                    restart_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                }
+            },
+        );
+    }
+
+    eprintln!("[CMD] Command queue closed, command worker stopping");
+}
+
 /// Run one command against the control state and answer on the feedback topic
 /// with whatever it did. Holding the lock for the whole command is what keeps
 /// two of them from driving the control executable at the same time.
@@ -457,11 +521,11 @@ fn stop_prosthesis_out_of_band(
 ) {
     eprintln!("[SIG] {} received. Stopping RoboticLegControl...", trigger);
 
-    // Kill first and take the state lock afterwards. A power or gait command
-    // can hold that lock for a while, and the whole point of this is that the
-    // prosthesis stops now; the flag is what keeps such a command from
-    // starting it up again behind our back.
-    STOP_REQUESTED.store(true, Ordering::SeqCst);
+    // Kill first and take the state lock afterwards. A start that keeps
+    // retrying holds that lock for as long as it takes, and the whole point of
+    // this is that the prosthesis stops now. Superseding it is what makes it
+    // let go instead of starting the prosthesis up again behind our back.
+    next_command_generation();
 
     let mut killed = ProsthesisState::On;
     let result = stop_robotic_leg_control(&mut killed)
@@ -485,8 +549,6 @@ fn stop_prosthesis_out_of_band(
             result,
         );
     }
-
-    STOP_REQUESTED.store(false, Ordering::SeqCst);
 
     if shutdown {
         // Let the event loop put the feedback on the wire before the process
@@ -605,100 +667,133 @@ fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
 }
 
 /// Launch the RoboticLegControl executable (`sudo <bin> --gait=<n> --I=<n>`) as
-/// a detached child and make sure it actually came up: a start that does not
-/// report a healthy buffer size is killed and tried again, up to
-/// `STARTUP_ATTEMPTS` times. We intentionally do not wait on the control loop
-/// itself: it is long-running and is later stopped by
-/// `stop_robotic_leg_control`. On success `state` is set to `On`; when every
-/// attempt failed it is set to `Off`, since the last attempt is cleaned up
-/// before giving up.
+/// a detached child and keep at it until it comes up stable: a start whose
+/// buffer does not keep reaching `HEALTHY_DATA_BYTES` is killed and tried
+/// again, for as long as it takes. Only two things end that early: the
+/// actuators turning out to be off, which no restart fixes, and a newer command
+/// coming in (`generation`), which is what the operator wants now instead.
+///
+/// We intentionally do not wait on the control loop itself: it is long-running
+/// and is later stopped by `stop_robotic_leg_control`. On success `state` is
+/// set to `On`; when the start ends without success it is set to `Off`, since
+/// every failed attempt is cleaned up.
 fn start_robotic_leg_control(
     state: &mut ProsthesisState,
     launch: LaunchSettings,
+    generation: u64,
 ) -> Result<String, String> {
     if *state == ProsthesisState::On {
         return Ok("RoboticLegControl is already running".to_string());
     }
 
-    let mut failures: Vec<String> = Vec::new();
+    let mut failed_attempts: u32 = 0;
+    let mut last_failure = String::new();
+    let mut attempt: u32 = 0;
 
-    for attempt in 1..=STARTUP_ATTEMPTS {
-        // A stop signal beats a start that is on its way up: the signal
-        // handler already killed whatever was running, so starting another one
-        // here would undo exactly what was asked for.
-        if STOP_REQUESTED.load(Ordering::SeqCst) {
+    loop {
+        attempt += 1;
+
+        // A newer command beats a start that is on its way up. For a stop
+        // signal in particular, whatever was running is already killed, so
+        // starting another one here would undo exactly what was asked for.
+        if superseded(generation) {
             *state = ProsthesisState::Off;
 
             return Err(format!(
-                "start aborted before attempt {}: a stop signal came in",
+                "start abandoned before attempt {}: a newer command came in",
                 attempt
             ));
         }
 
-        match spawn_and_verify_robotic_leg_control(launch) {
+        let failure = match spawn_and_verify_robotic_leg_control(launch, generation) {
             Ok(message) => {
                 *state = ProsthesisState::On;
 
-                return Ok(if failures.is_empty() {
+                return Ok(if failed_attempts == 0 {
                     message
                 } else {
-                    format!("{} (after {})", message, failures.join("; "))
+                    format!(
+                        "{} (after {} failed attempts; the last one: {})",
+                        message, failed_attempts, last_failure
+                    )
                 });
             }
-            Err(failure) => {
-                eprintln!(
-                    "[CMD] RoboticLegControl startup attempt {}/{} failed: {}",
-                    attempt,
-                    STARTUP_ATTEMPTS,
-                    failure.message()
-                );
-                failures.push(format!("failed attempt {}: {}", attempt, failure.message()));
+            Err(failure) => failure,
+        };
 
-                // Whatever is left of the failed attempt has to go before the
-                // next one, otherwise two control loops end up fighting over
-                // the hardware. This is also what takes the process down when
-                // there is not going to be a next one.
-                // `stop_robotic_leg_control` returns early when it is told the
-                // prosthesis is off, so give it a local `On`.
-                let mut leftover = ProsthesisState::On;
+        eprintln!(
+            "[CMD] RoboticLegControl startup attempt {} failed: {}",
+            attempt,
+            failure.message()
+        );
 
-                match stop_robotic_leg_control(&mut leftover) {
-                    // Logged even when it found nothing to do: a cleanup that
-                    // quietly killed nothing is exactly the case worth seeing
-                    // in the journal.
-                    Ok(stop_message) => eprintln!(
-                        "[CMD] Cleaned up after failed startup attempt {}: {}",
-                        attempt, stop_message
-                    ),
-                    Err(stop_error) => {
-                        eprintln!(
-                            "[CMD] Could not clean up after failed startup attempt {}: {}",
-                            attempt, stop_error
-                        );
-                        failures
-                            .push(format!("failed attempt {} cleanup: {}", attempt, stop_error));
-                    }
-                }
+        // Whatever is left of the failed attempt has to go before the next
+        // one, otherwise two control loops end up fighting over the hardware.
+        // This is also what takes the process down when there is not going to
+        // be a next one. `stop_robotic_leg_control` returns early when it is
+        // told the prosthesis is off, so give it a local `On`.
+        let mut leftover = ProsthesisState::On;
 
-                if failure.is_fatal() {
-                    *state = ProsthesisState::Off;
+        match stop_robotic_leg_control(&mut leftover) {
+            // Logged even when it found nothing to do: a cleanup that quietly
+            // killed nothing is exactly the case worth seeing in the journal.
+            Ok(stop_message) => eprintln!(
+                "[CMD] Cleaned up after failed startup attempt {}: {}",
+                attempt, stop_message
+            ),
+            Err(stop_error) => eprintln!(
+                "[CMD] Could not clean up after failed startup attempt {}: {}",
+                attempt, stop_error
+            ),
+        }
 
-                    return Err(format!(
-                        "RoboticLegControl cannot start and starting again would not help: {}",
-                        failures.join("; ")
-                    ));
-                }
+        match failure {
+            StartFailure::Fatal(message) => {
+                *state = ProsthesisState::Off;
+
+                return Err(format!(
+                    "RoboticLegControl cannot start and starting again would not help: {}",
+                    message
+                ));
+            }
+            StartFailure::Superseded => {
+                *state = ProsthesisState::Off;
+
+                return Err(format!(
+                    "start abandoned during attempt {}: a newer command came in",
+                    attempt
+                ));
+            }
+            StartFailure::Retryable(message) => {
+                failed_attempts += 1;
+                last_failure = message;
             }
         }
+
+        eprintln!(
+            "[CMD] Restarting RoboticLegControl in {}ms (attempt {} next)",
+            RESTART_DELAY.as_millis(),
+            attempt + 1
+        );
+
+        sleep_unless_superseded(RESTART_DELAY, generation);
     }
+}
 
-    *state = ProsthesisState::Off;
+/// Sleep for `duration`, waking early if a newer command comes in, so a start
+/// that is between attempts lets go of the prosthesis without delay.
+fn sleep_unless_superseded(duration: Duration, generation: u64) {
+    let deadline = Instant::now() + duration;
 
-    Err(format!(
-        "RoboticLegControl did not start up correctly in {} attempts: {}",
-        STARTUP_ATTEMPTS,
-        failures.join("; ")
-    ))
+    while !superseded(generation) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+
+        if remaining.is_zero() {
+            return;
+        }
+
+        thread::sleep(remaining.min(SUPERSEDE_POLL_INTERVAL));
+    }
 }
 
 /// Start the control executable once and watch its stdout for what it reports
@@ -706,7 +801,10 @@ fn start_robotic_leg_control(
 /// as long as it runs; only the beginning of it is inspected. Fails when the
 /// process dies right away, when a maxon drive does not answer, or when the
 /// buffer never reaches `HEALTHY_DATA_BYTES`.
-fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String, StartFailure> {
+fn spawn_and_verify_robotic_leg_control(
+    launch: LaunchSettings,
+    generation: u64,
+) -> Result<String, StartFailure> {
     let mut child = std::process::Command::new("sudo")
         .arg(ROBOTIC_LEG_CONTROL_BIN)
         .args(launch.as_args())
@@ -729,11 +827,13 @@ fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String
     thread::spawn(move || forward_robotic_leg_control_stdout(stdout, reports));
 
     eprintln!(
-        "[CMD] Watching the startup of RoboticLegControl (sudo pid {}): its buffer has to reach {} bytes",
-        pid, HEALTHY_DATA_BYTES
+        "[CMD] Watching the startup of RoboticLegControl (sudo pid {}): its buffer has to keep reaching {} bytes for {}s",
+        pid,
+        HEALTHY_DATA_BYTES,
+        STARTUP_STABILIZATION.as_secs()
     );
 
-    let startup = watch_startup(&reports_receiver);
+    let startup = watch_startup(&reports_receiver, generation);
 
     // `spawn` only reports that the process was launched: `sudo` can still exit
     // right away (missing binary, missing permission). The watch window already
@@ -776,57 +876,88 @@ fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String
     });
 
     Ok(format!(
-        "started RoboticLegControl with gait {} and current {} (sudo pid {}), buffer reaching {} bytes",
-        launch.gait, launch.current, pid, HEALTHY_DATA_BYTES
+        "started RoboticLegControl with gait {} and current {} (sudo pid {}), buffer steadily reaching {} bytes for {}s",
+        launch.gait,
+        launch.current,
+        pid,
+        HEALTHY_DATA_BYTES,
+        STARTUP_STABILIZATION.as_secs()
     ))
 }
 
 /// Judge a startup by the one thing that says the prosthesis is working: the
-/// buffer reaching `HEALTHY_DATA_BYTES` and being read out. Healthy the moment
-/// that happens, bad if it has not happened within `STARTUP_WATCH_WINDOW` of
-/// the first report, hopeless the moment a maxon drive turns out not to answer.
+/// buffer reaching exactly `HEALTHY_DATA_BYTES` and being read out, over and
+/// over. It has to keep doing that, never going `STARTUP_WATCH_WINDOW` without
+/// it, for `STARTUP_STABILIZATION` before the start counts as healthy. A lone
+/// 52 is not enough: an out-of-sync buffer keeps growing, passes through 52
+/// once on its way up and never comes back to it.
 ///
-/// The clock only starts on the first report, so the CAN and maxon
-/// initialization before it does not count against the prosthesis; reporting
-/// nothing at all within `STARTUP_STREAM_TIMEOUT` is a bad startup of its own.
-fn watch_startup(reports: &mpsc::Receiver<StartupReport>) -> Result<(), StartFailure> {
+/// Also fails the moment a maxon drive turns out not to answer, and gives up as
+/// soon as a newer command than `generation` comes in. The clock only starts on
+/// the first report, so the CAN and maxon initialization before it does not
+/// count against the prosthesis; reporting nothing at all within
+/// `STARTUP_STREAM_TIMEOUT` is a bad startup of its own.
+fn watch_startup(
+    reports: &mpsc::Receiver<StartupReport>,
+    generation: u64,
+) -> Result<(), StartFailure> {
     // Until the buffer is reported at all, the overall timeout is what limits
-    // the wait; from the first report on, the watch window does.
+    // the wait. From then on the buffer has to reach 52 again before each
+    // deadline, which moves forward every time it does.
     let mut deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
+    let mut stable_since: Option<Instant> = None;
     let mut data_reports: u32 = 0;
+    let mut healthy_reports: u32 = 0;
     let mut highest_seen: u64 = 0;
 
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        if superseded(generation) {
+            return Err(StartFailure::Superseded);
+        }
 
-        if remaining.is_zero() {
+        let now = Instant::now();
+
+        // Checked before stability, so a gap right at the end still fails.
+        if now >= deadline {
             break;
         }
 
-        match reports.recv_timeout(remaining) {
-            Ok(StartupReport::DataBytes(HEALTHY_DATA_BYTES)) => return Ok(()),
+        if stable_since.is_some_and(|since| now.duration_since(since) >= STARTUP_STABILIZATION) {
+            return Ok(());
+        }
+
+        let wait = deadline
+            .saturating_duration_since(now)
+            .min(SUPERSEDE_POLL_INTERVAL);
+
+        match reports.recv_timeout(wait) {
             Ok(StartupReport::DataBytes(size)) => {
-                if data_reports == 0 {
+                data_reports += 1;
+                highest_seen = highest_seen.max(size);
+
+                if size == HEALTHY_DATA_BYTES {
+                    healthy_reports += 1;
+                    stable_since.get_or_insert_with(Instant::now);
+                    deadline = Instant::now() + STARTUP_WATCH_WINDOW;
+                } else if data_reports == 1 {
                     // The buffer is being reported now, so this is where the
                     // watch window starts.
                     deadline = Instant::now() + STARTUP_WATCH_WINDOW;
                 }
-
-                data_reports += 1;
-                highest_seen = highest_seen.max(size);
             }
             Ok(StartupReport::UnresponsiveDrive(axis)) => {
                 // Actuators that are switched off are not something the bridge
                 // fixes by starting the control loop again, so say so and stop
-                // here instead of burning the remaining attempts on it.
+                // here instead of restarting it forever.
                 return Err(StartFailure::Fatal(format!(
                     "maxon drive on axis {} did not answer, so the prosthesis would run without that axis: its actuators are most likely switched off",
                     axis
                 )));
             }
-            // Either a deadline ran out or the process closed its stdout. Both
-            // are decided by what was seen so far.
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // The process closed its stdout, which it only does on the way
+            // out. Decided by what was seen so far.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -837,9 +968,19 @@ fn watch_startup(reports: &mpsc::Receiver<StartupReport>) -> Result<(), StartFai
         )));
     }
 
+    if healthy_reports == 0 {
+        return Err(StartFailure::Retryable(format!(
+            "RoboticLegControl buffer never reached {} bytes in {} reports (highest was {})",
+            HEALTHY_DATA_BYTES, data_reports, highest_seen
+        )));
+    }
+
     Err(StartFailure::Retryable(format!(
-        "RoboticLegControl buffer never reached {} bytes in {} reports (highest was {})",
-        HEALTHY_DATA_BYTES, data_reports, highest_seen
+        "RoboticLegControl buffer reached {} bytes {} times, then went {}ms without it: not stable (highest was {})",
+        HEALTHY_DATA_BYTES,
+        healthy_reports,
+        STARTUP_WATCH_WINDOW.as_millis(),
+        highest_seen
     )))
 }
 
@@ -1020,8 +1161,9 @@ fn wait_for_control_processes_to_exit(
 fn restart_robotic_leg_control(
     state: &mut ProsthesisState,
     launch: LaunchSettings,
+    generation: u64,
 ) -> Result<String, String> {
     let stop_message = stop_robotic_leg_control(state)?;
-    let start_message = start_robotic_leg_control(state, launch)?;
+    let start_message = start_robotic_leg_control(state, launch, generation)?;
     Ok(format!("{}; {}", stop_message, start_message))
 }

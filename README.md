@@ -70,11 +70,15 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 - A healthy prosthesis fills the buffer up, reads it out when it reaches **exactly 52** bytes and drops back to 0, over and over. Every value on the way there is normal.
 - A bad start never reaches 52. It may well go past it — a faulty actuator has been seen cycling `24, 24, 24, 60` and climbing into the 70s — so the check is an exact match on 52, not "at least 52".
 
-The rule is just that: **did the buffer reach 52 within a second of the data starting?** The watch begins at the first report, so the CAN bus and maxon initialization before it does not count against the prosthesis, and it ends the moment 52 shows up — on a healthy start that is a few milliseconds in. A start that reports nothing at all within ten seconds counts as bad too.
+The rule: **the buffer has to keep reaching exactly 52 — never going a second without it — for three seconds in a row.** A single 52 is not enough. Out of sync, the buffer never drains and keeps growing, so on its way up it can pass through 52 once (`…50, 51, 52, 53…`) and never come back to it; a check that stopped at the first 52 would call that prosthesis healthy and then leave it running broken. A healthy one reaches 52 every few reports, a few dozen milliseconds apart, so three seconds of it is unambiguous.
+
+The watch begins at the first report, so the CAN bus and maxon initialization before it does not count against the prosthesis. A start that reports nothing at all within ten seconds counts as bad too.
 
 There is one failure the check refuses to retry. When the actuators are switched off, the maxon drives never answer on the CAN bus and the executable gives up on them with `[maxon] no <n> NAO respondeu. O modelo vai rodar sem esse eixo.`, carrying on without the axis. The buffer can still reach 52 in that state, so a startup that only watched the buffer would call a prosthesis that cannot move healthy. As soon as such a line shows up the process is killed and the command answers `failure` right away: no amount of starting again switches the actuators on, so the remaining attempts are not spent on it.
 
-Any other bad start is killed and retried, up to 3 attempts. Killing means `SIGTERM` first, so the control executable gets to write its `.mat` file, and `SIGKILL` three seconds later if it is still there — a process that sits through `SIGTERM` must not be able to keep the prosthesis running. Every attempt logs what the cleanup did, including the case where it found nothing to kill. The power feedback message reports `success` on the first healthy start (naming the attempts that failed before it, if any) and `failure` with the reason of each attempt when all of them failed, leaving the prosthesis stopped.
+Any other bad start is killed and **retried for as long as it takes**, a second apart, until the prosthesis comes up stable. Killing means `SIGTERM` first, so the control executable gets to write its `.mat` file, and `SIGKILL` three seconds later if it is still there — a process that sits through `SIGTERM` must not be able to keep the prosthesis running. Every attempt logs what the cleanup did, including the case where it found nothing to kill. The feedback message only reports `success` once the prosthesis is stable, naming how many attempts failed before it. It reports `failure` only when the actuators are off, or when a newer command comes in while the start is still retrying — a power off, a different gait, a stop signal — in which case the start lets go of the prosthesis and the newer command runs instead.
+
+Commands run on a worker thread of their own, one at a time in the order they arrived. That keeps the MQTT connection alive during a start that retries for minutes, which is what lets a power off get through to stop it.
 
 ## Stopping from the Pi
 
@@ -93,7 +97,7 @@ The wrapper handles three signals, and every one of them answers on the feedback
 | `SIGINT` | Ctrl+C, when run in a terminal instead of under systemd | Kills the control executable, then exits. |
 | `SIGTERM` | `systemctl stop prosthesis-logger-wrapper` | Kills the control executable, then exits. |
 
-A stop signal also cancels a power-on that is still retrying, so the prosthesis is not brought back up by a start that was already on its way.
+A stop signal also cancels a start that is still retrying, so the prosthesis is not brought back up by a start that was already on its way.
 
 ## Notes
 
