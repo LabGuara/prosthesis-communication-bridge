@@ -57,7 +57,7 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
   "state": "on",
   "gait": 1,
   "current": 5000,
-  "message": "stopped RoboticLegControl (pids 1234, 1235); started RoboticLegControl with gait 1 and current 5000 (sudo pid 1287), buffer reaching 52 bytes"
+  "message": "stopped RoboticLegControl (pids 1234, 1235); started RoboticLegControl with gait 1 and current 5000 (sudo pid 1287), buffer steadily cycling 52 -> 0 for 3s"
 }
 ```
 
@@ -67,10 +67,10 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 
 `RoboticLegControl` reports its input buffer on stdout as `Data bytes available <n>, out = 0.`. The wrapper captures that stdout, forwards every line to its own stdout unchanged, and watches the buffer on every start (power on and gait changes alike):
 
-- A healthy prosthesis fills the buffer up, reads it out when it reaches **exactly 52** bytes and drops back to 0, over and over. Every value on the way there is normal.
-- A bad start never reaches 52. It may well go past it — a faulty actuator has been seen cycling `24, 24, 24, 60` and climbing into the 70s — so the check is an exact match on 52, not "at least 52".
+- A working prosthesis runs one cycle, over and over: the buffer **fills up to exactly 52, and the very next report is 0** (`21, 52, 0, 0, 23, 52, 0, 0, ...`).
+- Anything else is not working. Out of sync, the buffer is never read out: it goes past 52 (`23, 23, 45, 75`) and never returns to 0, while one column of it keeps climbing through every value — 52 included, and again and again as it wraps around. That is why the check looks at the cycle, not at whether 52 shows up.
 
-The rule: **the buffer has to keep reaching exactly 52 — never going a second without it — for three seconds in a row.** A single 52 is not enough. Out of sync, the buffer never drains and keeps growing, so on its way up it can pass through 52 once (`…50, 51, 52, 53…`) and never come back to it; a check that stopped at the first 52 would call that prosthesis healthy and then leave it running broken. A healthy one reaches 52 every few reports, a few dozen milliseconds apart, so three seconds of it is unambiguous.
+The rule: **the 52 → 0 cycle has to keep going for three seconds, never a second without completing, and a single report that breaks it fails the start on the spot** — a buffer past 52, or a 52 followed by anything but 0. Out of sync, that happens within the first few reports, so a bad start is caught in milliseconds; a good one gets its success feedback after three seconds of clean cycles.
 
 The watch begins at the first report, so the CAN bus and maxon initialization before it does not count against the prosthesis. A start that reports nothing at all within ten seconds counts as bad too.
 

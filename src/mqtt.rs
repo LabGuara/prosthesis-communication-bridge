@@ -37,11 +37,12 @@ const ROBOTIC_LEG_CONTROL_BIN: &str =
     "/home/labguara/Resultados/MATLAB_ws/R2025b/RoboticLegControl2025b.elf";
 
 /// While it runs, the control executable reports its input buffer on stdout as
-/// `Data bytes available <n>, out = 0.`. On a healthy prosthesis the buffer
-/// fills up, is read out once it reaches 52 bytes and drops back to 0, over and
-/// over. Every value on the way there is normal; a startup that never reaches
-/// 52, stalling at some other number instead, is a bad one and has to be
-/// restarted.
+/// `Data bytes available <n>, out = 0.`. On a working prosthesis that is one
+/// cycle, over and over: the buffer fills up to exactly 52 bytes, is read out,
+/// and the very next report is 0 (`21, 52, 0, 0, 23, 52, 0, 0, ...`). Anything
+/// else means it is not working. Out of sync, the buffer is never read out: it
+/// goes past 52 and never comes back to 0, and a column of it keeps climbing
+/// through every value, 52 included, again and again.
 const HEALTHY_DATA_BYTES: u64 = 52;
 
 /// How long to wait for the control executable to report the buffer at all.
@@ -49,15 +50,13 @@ const HEALTHY_DATA_BYTES: u64 = 52;
 /// which the startup check has no opinion about.
 const STARTUP_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the buffer may go without reaching `HEALTHY_DATA_BYTES`, counted
-/// from the first report and then again from every time it does. A healthy
-/// prosthesis gets there every few reports, a few dozen milliseconds apart.
+/// How long the buffer may go without completing a 52 → 0 cycle, counted from
+/// the first report and then again from every cycle. A working prosthesis
+/// completes one every few reports, a few dozen milliseconds apart.
 const STARTUP_WATCH_WINDOW: Duration = Duration::from_secs(1);
 
-/// How long the buffer has to keep reaching `HEALTHY_DATA_BYTES` before a start
-/// counts as healthy. A single 52 proves nothing: on a prosthesis out of sync
-/// the buffer keeps growing instead of draining, and on its way up it passes
-/// through 52 once and moves on.
+/// How long the 52 → 0 cycle has to keep going, without a single report
+/// breaking it, before a start counts as healthy and gets its success feedback.
 const STARTUP_STABILIZATION: Duration = Duration::from_secs(3);
 
 /// Pause between a failed start and the next one, so the drives get a moment
@@ -827,7 +826,7 @@ fn spawn_and_verify_robotic_leg_control(
     thread::spawn(move || forward_robotic_leg_control_stdout(stdout, reports));
 
     eprintln!(
-        "[CMD] Watching the startup of RoboticLegControl (sudo pid {}): its buffer has to keep reaching {} bytes for {}s",
+        "[CMD] Watching the startup of RoboticLegControl (sudo pid {}): its buffer has to keep cycling {} -> 0 for {}s",
         pid,
         HEALTHY_DATA_BYTES,
         STARTUP_STABILIZATION.as_secs()
@@ -876,7 +875,7 @@ fn spawn_and_verify_robotic_leg_control(
     });
 
     Ok(format!(
-        "started RoboticLegControl with gait {} and current {} (sudo pid {}), buffer steadily reaching {} bytes for {}s",
+        "started RoboticLegControl with gait {} and current {} (sudo pid {}), buffer steadily cycling {} -> 0 for {}s",
         launch.gait,
         launch.current,
         pid,
@@ -885,12 +884,13 @@ fn spawn_and_verify_robotic_leg_control(
     ))
 }
 
-/// Judge a startup by the one thing that says the prosthesis is working: the
-/// buffer reaching exactly `HEALTHY_DATA_BYTES` and being read out, over and
-/// over. It has to keep doing that, never going `STARTUP_WATCH_WINDOW` without
-/// it, for `STARTUP_STABILIZATION` before the start counts as healthy. A lone
-/// 52 is not enough: an out-of-sync buffer keeps growing, passes through 52
-/// once on its way up and never comes back to it.
+/// Judge a startup by the cycle that says the prosthesis is working: the buffer
+/// fills up to exactly `HEALTHY_DATA_BYTES`, and the very next report is 0.
+/// That cycle has to keep going for `STARTUP_STABILIZATION`, never going
+/// `STARTUP_WATCH_WINDOW` without completing, before the start counts as
+/// healthy. A single report that breaks it fails the start on the spot: a
+/// buffer past 52 (it overflowed instead of being read out), or a 52 followed
+/// by anything but 0 (it reached 52 and was still not read out).
 ///
 /// Also fails the moment a maxon drive turns out not to answer, and gives up as
 /// soon as a newer command than `generation` comes in. The clock only starts on
@@ -902,13 +902,13 @@ fn watch_startup(
     generation: u64,
 ) -> Result<(), StartFailure> {
     // Until the buffer is reported at all, the overall timeout is what limits
-    // the wait. From then on the buffer has to reach 52 again before each
-    // deadline, which moves forward every time it does.
+    // the wait. From then on a cycle has to complete before each deadline,
+    // which moves forward every time one does.
     let mut deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
     let mut stable_since: Option<Instant> = None;
+    let mut previous: Option<u64> = None;
     let mut data_reports: u32 = 0;
-    let mut healthy_reports: u32 = 0;
-    let mut highest_seen: u64 = 0;
+    let mut cycles: u32 = 0;
 
     loop {
         if superseded(generation) {
@@ -933,17 +933,34 @@ fn watch_startup(
         match reports.recv_timeout(wait) {
             Ok(StartupReport::DataBytes(size)) => {
                 data_reports += 1;
-                highest_seen = highest_seen.max(size);
 
-                if size == HEALTHY_DATA_BYTES {
-                    healthy_reports += 1;
-                    stable_since.get_or_insert_with(Instant::now);
-                    deadline = Instant::now() + STARTUP_WATCH_WINDOW;
-                } else if data_reports == 1 {
+                if data_reports == 1 {
                     // The buffer is being reported now, so this is where the
                     // watch window starts.
                     deadline = Instant::now() + STARTUP_WATCH_WINDOW;
                 }
+
+                if size > HEALTHY_DATA_BYTES {
+                    return Err(StartFailure::Retryable(format!(
+                        "RoboticLegControl buffer went to {} bytes after {} cycles: a working prosthesis fills it to exactly {} and reads it out, it never goes past",
+                        size, cycles, HEALTHY_DATA_BYTES
+                    )));
+                }
+
+                if previous == Some(HEALTHY_DATA_BYTES) {
+                    if size != 0 {
+                        return Err(StartFailure::Retryable(format!(
+                            "RoboticLegControl buffer reached {} bytes but was not read out (next report was {} instead of 0) after {} cycles",
+                            HEALTHY_DATA_BYTES, size, cycles
+                        )));
+                    }
+
+                    cycles += 1;
+                    stable_since.get_or_insert_with(Instant::now);
+                    deadline = Instant::now() + STARTUP_WATCH_WINDOW;
+                }
+
+                previous = Some(size);
             }
             Ok(StartupReport::UnresponsiveDrive(axis)) => {
                 // Actuators that are switched off are not something the bridge
@@ -968,19 +985,18 @@ fn watch_startup(
         )));
     }
 
-    if healthy_reports == 0 {
+    if cycles == 0 {
         return Err(StartFailure::Retryable(format!(
-            "RoboticLegControl buffer never reached {} bytes in {} reports (highest was {})",
-            HEALTHY_DATA_BYTES, data_reports, highest_seen
+            "RoboticLegControl buffer never completed a {} -> 0 cycle in {} reports",
+            HEALTHY_DATA_BYTES, data_reports
         )));
     }
 
     Err(StartFailure::Retryable(format!(
-        "RoboticLegControl buffer reached {} bytes {} times, then went {}ms without it: not stable (highest was {})",
+        "RoboticLegControl buffer completed {} {} -> 0 cycles, then went {}ms without one",
+        cycles,
         HEALTHY_DATA_BYTES,
-        healthy_reports,
-        STARTUP_WATCH_WINDOW.as_millis(),
-        highest_seen
+        STARTUP_WATCH_WINDOW.as_millis()
     )))
 }
 
