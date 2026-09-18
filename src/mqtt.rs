@@ -54,12 +54,6 @@ const STARTUP_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// checking that the freshly spawned process is still alive.
 const STARTUP_WATCH_WINDOW: Duration = Duration::from_secs(1);
 
-/// How many buffer reports have to be seen before a startup may be called bad,
-/// however long they took. The buffer only reaches `HEALTHY_DATA_BYTES` once
-/// every few reports, so condemning a startup on a couple of them would fail a
-/// healthy prosthesis that simply prints slower than usual.
-const STARTUP_MIN_REPORTS: u32 = 20;
-
 /// How many times the control executable is started before giving up on a
 /// healthy startup.
 const STARTUP_ATTEMPTS: u32 = 3;
@@ -787,29 +781,22 @@ fn spawn_and_verify_robotic_leg_control(launch: LaunchSettings) -> Result<String
     ))
 }
 
-/// Judge a startup from what the control executable reports: healthy as soon as
-/// the buffer reaches `HEALTHY_DATA_BYTES`, hopeless the moment a maxon drive
-/// turns out not to answer, and bad once the buffer has been reporting other
-/// sizes for `STARTUP_WATCH_WINDOW` without getting there. The clock only
-/// starts on the first report, so a slow initialization does not count against
-/// the prosthesis; not reporting at all within `STARTUP_STREAM_TIMEOUT` is a
-/// bad startup of its own.
+/// Judge a startup by the one thing that says the prosthesis is working: the
+/// buffer reaching `HEALTHY_DATA_BYTES` and being read out. Healthy the moment
+/// that happens, bad if it has not happened within `STARTUP_WATCH_WINDOW` of
+/// the first report, hopeless the moment a maxon drive turns out not to answer.
+///
+/// The clock only starts on the first report, so the CAN and maxon
+/// initialization before it does not count against the prosthesis; reporting
+/// nothing at all within `STARTUP_STREAM_TIMEOUT` is a bad startup of its own.
 fn watch_startup(reports: &mpsc::Receiver<StartupReport>) -> Result<(), StartFailure> {
-    let stream_deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
-    let mut window_deadline: Option<Instant> = None;
+    // Until the buffer is reported at all, the overall timeout is what limits
+    // the wait; from the first report on, the watch window does.
+    let mut deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
     let mut data_reports: u32 = 0;
     let mut highest_seen: u64 = 0;
 
     loop {
-        // The startup is only called bad once the watch window ran out *and*
-        // enough reports back that verdict up. Until then the overall timeout
-        // is what limits the wait, so a control loop that prints slowly gets
-        // its reports counted instead of being failed on the clock alone.
-        let deadline = match window_deadline {
-            Some(window) if data_reports >= STARTUP_MIN_REPORTS => window.min(stream_deadline),
-            _ => stream_deadline,
-        };
-
         let remaining = deadline.saturating_duration_since(Instant::now());
 
         if remaining.is_zero() {
@@ -819,9 +806,11 @@ fn watch_startup(reports: &mpsc::Receiver<StartupReport>) -> Result<(), StartFai
         match reports.recv_timeout(remaining) {
             Ok(StartupReport::DataBytes(HEALTHY_DATA_BYTES)) => return Ok(()),
             Ok(StartupReport::DataBytes(size)) => {
-                // The buffer is being reported now, so this is where the watch
-                // window actually begins.
-                window_deadline.get_or_insert_with(|| Instant::now() + STARTUP_WATCH_WINDOW);
+                if data_reports == 0 {
+                    // The buffer is being reported now, so this is where the
+                    // watch window starts.
+                    deadline = Instant::now() + STARTUP_WATCH_WINDOW;
+                }
 
                 data_reports += 1;
                 highest_seen = highest_seen.max(size);
