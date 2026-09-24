@@ -1,5 +1,3 @@
-/// Whether the RoboticLegControl executable is currently running. The bridge
-/// keeps this in memory so repeated power commands are idempotent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProsthesisState {
     On,

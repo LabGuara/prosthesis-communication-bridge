@@ -3,7 +3,6 @@ use serde_json::json;
 
 use crate::models::prosthesis_state::ProsthesisState;
 
-/// The command a feedback message refers to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PowerCommand {
     On,
@@ -23,8 +22,6 @@ impl PowerCommand {
     }
 }
 
-/// Result of a power or gait command, published back to the main server so it
-/// knows whether the prosthesis actually reached the requested state.
 #[derive(Clone, Debug)]
 pub struct PowerFeedback {
     pub timestamp: DateTime<Utc>,

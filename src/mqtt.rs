@@ -11,38 +11,21 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Power command values received on the commands topic.
 const POWER_ON: u32 = 16;
 const POWER_OFF: u32 = 17;
 
-/// Gait modes, applied by restarting the control executable with the new mode.
 const MIN_GAIT_MODE: u32 = 1;
 const MAX_GAIT_MODE: u32 = 9;
 
-/// Actuator currents, applied the same way as a gait mode. The control
-/// executable validates the range itself and falls back to its default when a
-/// value is outside it, so the bridge only forwards what it knows is usable.
 const MIN_ACTUATOR_CURRENT: u32 = 3000;
 const MAX_ACTUATOR_CURRENT: u32 = 15000;
 
-/// What the control executable is started with until a gait or actuator
-/// current command selects something else. The current matches the default the
-/// control executable itself falls back to.
 const DEFAULT_GAIT_MODE: u8 = 1;
 const DEFAULT_ACTUATOR_CURRENT: u16 = 3000;
 
-/// The MATLAB-generated control executable started/stopped by the power
-/// commands. In `ps` its process name shows up truncated as `RoboticLegContr`.
 const ROBOTIC_LEG_CONTROL_BIN: &str =
     "/home/labguara/Resultados/MATLAB_ws/R2025b/RoboticLegControl2025b.elf";
 
-/// While it runs, the control executable reports its input buffer on stdout as
-/// `Data bytes available <n>, out = 0.`. On a working prosthesis that is one
-/// cycle, over and over: the buffer fills up to exactly 52 bytes, is read out,
-/// and the very next report is 0 (`21, 52, 0, 0, 23, 52, 0, 0, ...`). Anything
-/// else means it is not working. Out of sync, the buffer is never read out: it
-/// goes past 52 and never comes back to 0, and a column of it keeps climbing
-/// through every value, 52 included, again and again.
 const HEALTHY_DATA_BYTES: u64 = 52;
 
 /// How long to wait for the control executable to report the buffer at all.
@@ -120,7 +103,6 @@ impl StartFailure {
     }
 }
 
-/// What a command on the commands topic asks for.
 #[derive(Clone, Copy, Debug)]
 enum ControlCommand {
     PowerOn,
@@ -140,8 +122,6 @@ enum StartupReport {
     UnresponsiveDrive(String),
 }
 
-/// What the control executable is launched with. The gait and actuator current
-/// commands are exactly this: a new value here, followed by a restart.
 #[derive(Clone, Copy, Debug)]
 struct LaunchSettings {
     gait: u8,
@@ -149,15 +129,11 @@ struct LaunchSettings {
 }
 
 impl LaunchSettings {
-    /// The command line arguments these settings amount to.
     fn as_args(self) -> [String; 2] {
         [format!("--gait={}", self.gait), format!("--I={}", self.current)]
     }
 }
 
-/// What the bridge holds about the prosthesis. Both the MQTT command handler
-/// and the stop signal handler drive the control executable, so this lives
-/// behind a mutex: whoever holds it is the one allowed to start or stop it.
 #[derive(Clone, Copy, Debug)]
 struct ControlState {
     prosthesis: ProsthesisState,
@@ -166,8 +142,6 @@ struct ControlState {
 }
 
 impl ControlState {
-    /// What a start should launch the control executable with, as the gait and
-    /// actuator current commands have left it.
     fn launch(&self) -> LaunchSettings {
         LaunchSettings { gait: self.gait, current: self.current }
     }
@@ -351,20 +325,11 @@ impl MqttPublisher {
                                 // of is worse than doing nothing, so unknown commands are
                                 // only logged.
                                 Ok(value) => {
-                                    eprintln!(
-                                        "[CMD] Ignoring unknown command {}: expected {}/{} (power), {}-{} (gait) or {}-{} (actuator current)",
-                                        value,
-                                        POWER_ON,
-                                        POWER_OFF,
-                                        MIN_GAIT_MODE,
-                                        MAX_GAIT_MODE,
-                                        MIN_ACTUATOR_CURRENT,
-                                        MAX_ACTUATOR_CURRENT,
-                                    );
+                                    eprintln!("[CMD] Ignoring unknown command {}", value);
                                     None
                                 }
-                                Err(e) => {
-                                    eprintln!("[MQTT] Failed to parse command payload {:?} as a number: {:?}", payload_str, e);
+                                Err(_) => {
+                                    eprintln!("[MQTT] Failed to parse command payload {:?} as a number", payload_str);
                                     None
                                 }
                             };
@@ -875,12 +840,10 @@ fn spawn_and_verify_robotic_leg_control(
     });
 
     Ok(format!(
-        "started RoboticLegControl with gait {} and current {} (sudo pid {}), buffer steadily cycling {} -> 0 for {}s",
+        "started RoboticLegControl with gait {} and current {} (sudo pid {})",
         launch.gait,
         launch.current,
-        pid,
-        HEALTHY_DATA_BYTES,
-        STARTUP_STABILIZATION.as_secs()
+        pid
     ))
 }
 
@@ -941,18 +904,12 @@ fn watch_startup(
                 }
 
                 if size > HEALTHY_DATA_BYTES {
-                    return Err(StartFailure::Retryable(format!(
-                        "RoboticLegControl buffer went to {} bytes after {} cycles: a working prosthesis fills it to exactly {} and reads it out, it never goes past",
-                        size, cycles, HEALTHY_DATA_BYTES
-                    )));
+                    return Err(StartFailure::Retryable(format!("RoboticLegControl buffer desynchronized")));
                 }
 
                 if previous == Some(HEALTHY_DATA_BYTES) {
                     if size != 0 {
-                        return Err(StartFailure::Retryable(format!(
-                            "RoboticLegControl buffer reached {} bytes but was not read out (next report was {} instead of 0) after {} cycles",
-                            HEALTHY_DATA_BYTES, size, cycles
-                        )));
+                        return Err(StartFailure::Retryable(format!("RoboticLegControl buffer desynchronized")));
                     }
 
                     cycles += 1;
@@ -967,7 +924,7 @@ fn watch_startup(
                 // fixes by starting the control loop again, so say so and stop
                 // here instead of restarting it forever.
                 return Err(StartFailure::Fatal(format!(
-                    "maxon drive on axis {} did not answer, so the prosthesis would run without that axis: its actuators are most likely switched off",
+                    "maxon drive on axis {} did not answer: its actuators are most likely switched off",
                     axis
                 )));
             }
