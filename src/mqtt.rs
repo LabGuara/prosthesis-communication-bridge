@@ -28,69 +28,36 @@ const ROBOTIC_LEG_CONTROL_BIN: &str =
 
 const HEALTHY_DATA_BYTES: u64 = 52;
 
-/// How long to wait for the control executable to report the buffer at all.
-/// Everything it prints before that is initialization (CAN bus, maxon drives),
-/// which the startup check has no opinion about.
 const STARTUP_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the buffer may go without completing a 52 → 0 cycle, counted from
-/// the first report and then again from every cycle. A working prosthesis
-/// completes one every few reports, a few dozen milliseconds apart.
 const STARTUP_WATCH_WINDOW: Duration = Duration::from_secs(1);
 
-/// How long the 52 → 0 cycle has to keep going, without a single report
-/// breaking it, before a start counts as healthy and gets its success feedback.
 const STARTUP_STABILIZATION: Duration = Duration::from_secs(3);
 
-/// Pause between a failed start and the next one, so the drives get a moment
-/// before being brought up again.
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
-/// How often a start in progress checks whether a newer command came in.
 const SUPERSEDE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// How long to keep waiting for killed processes to actually go away, and how
-/// often to look in the meantime. `sudo kill` only asks the control executable
-/// to terminate: it shuts down on its own time and `sudo` only exits once it
-/// has, which regularly takes longer than a single short delay.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long `SIGTERM` is given before the same processes are sent `SIGKILL`.
-/// Asking is better for the control executable, which writes its `.mat` file on
-/// the way out, but a prosthesis that has to stop has to stop: asking is not
-/// allowed to be the last word.
 const KILL_ESCALATION_DELAY: Duration = Duration::from_secs(3);
 
-/// How long a signalled shutdown waits before exiting, so the MQTT event loop
-/// gets to put the last feedback message on the wire first.
 const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_secs(1);
 
-/// Bumped for every command, whether it came over MQTT or as a stop signal. A
-/// start remembers the value it began under and gives up as soon as it changes:
-/// whatever came in since is what the operator wants now. A start retries
-/// until the prosthesis works, so without this nothing could ever get past one.
 static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Supersede whatever is still in progress, and hand out the generation the
-/// new command runs under.
 fn next_command_generation() -> u64 {
     COMMAND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-/// Whether a newer command came in since `generation` was handed out.
 fn superseded(generation: u64) -> bool {
     COMMAND_GENERATION.load(Ordering::SeqCst) != generation
 }
 
-/// Why a start attempt failed, and what that means for the next one.
 enum StartFailure {
-    /// The control loop came up, just not healthily. Another attempt may work.
     Retryable(String),
-    /// Another attempt would fail in exactly the same way, because what the
-    /// control loop is missing is not something a restart provides.
     Fatal(String),
-    /// A newer command came in, so there is no point in another attempt.
     Superseded,
 }
 
@@ -111,14 +78,8 @@ enum ControlCommand {
     SetActuatorCurrent(u16),
 }
 
-/// What the startup check picks out of the control executable's stdout.
 enum StartupReport {
-    /// The input buffer, from a `Data bytes available <n>, out = 0.` line.
     DataBytes(u64),
-    /// A maxon drive that never answered, named by its axis. The control
-    /// executable carries on without the axis, so this has to be caught: the
-    /// buffer may well reach `HEALTHY_DATA_BYTES` on a prosthesis that cannot
-    /// move.
     UnresponsiveDrive(String),
 }
 
@@ -149,9 +110,6 @@ impl ControlState {
 
 type SharedControlState = Arc<Mutex<ControlState>>;
 
-/// Take the control state lock, ignoring poisoning. A handler that panicked
-/// mid-command leaves the state behind poisoned, and refusing every command
-/// from then on is worse for a prosthesis than working with it.
 fn lock_control_state(control_state: &Mutex<ControlState>) -> std::sync::MutexGuard<'_, ControlState> {
     control_state
         .lock()
@@ -209,9 +167,6 @@ impl MqttPublisher {
             _ => QoS::ExactlyOnce,
         };
 
-        // Seed the power state from the processes actually running, so a
-        // restart of this bridge does not think the prosthesis is off while
-        // the control loop is still up.
         let control_state: SharedControlState = Arc::new(Mutex::new(ControlState {
             prosthesis: match robotic_leg_control_pids() {
                 Ok(pids) if !pids.is_empty() => ProsthesisState::On,
@@ -241,11 +196,6 @@ impl MqttPublisher {
             move || listen_for_stop_signals(client, power_feedback_topic, qos, control_state)
         });
 
-        // Commands run on a thread of their own. A start retries until the
-        // prosthesis works, which can take any amount of time, and the MQTT
-        // connection only makes progress while the event loop below is polled:
-        // running commands there would stall it, and a power off could never
-        // arrive to stop a start that keeps failing.
         let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand)>();
 
         eprintln!("[CMD] Spawning command worker...");
@@ -268,14 +218,12 @@ impl MqttPublisher {
 
         eprintln!("[MQTT] Spawning event loop...");
 
-        // Spawn the event loop in a separate thread
         thread::spawn(move || {
             eprintln!("[MQTT] Event loop: connection handler started");
 
             let mut connection = connection;
 
             loop {
-                // Handle all pending messages from the queue
                 while let Ok(message) = receiver.try_recv() {
                     let log = Log {
                         timestamp: chrono::Utc::now(),
@@ -292,14 +240,12 @@ impl MqttPublisher {
                     }
                 }
 
-                // Poll for connection events with timeout
                 match connection.recv_timeout(Duration::from_secs(2)) {
                     Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::ConnAck(_)))) => {
                         eprintln!("[MQTT] Connected!");
                         let mut state = connected_for_wait.lock().unwrap();
                         *state = true;
 
-                        // Subscribe to commands topic when connected
                         match client.subscribe(&commands_topic, qos) {
                             Ok(_) => eprintln!("[MQTT] Subscribed to commands topic: {}", commands_topic),
                             Err(e) => eprintln!("[MQTT] Subscribe error: {:?}", e),
@@ -321,9 +267,6 @@ impl MqttPublisher {
                                 {
                                     Some(ControlCommand::SetActuatorCurrent(value as u16))
                                 }
-                                // Restarting the prosthesis on a value nobody can make sense
-                                // of is worse than doing nothing, so unknown commands are
-                                // only logged.
                                 Ok(value) => {
                                     eprintln!("[CMD] Ignoring unknown command {}", value);
                                     None
@@ -335,9 +278,6 @@ impl MqttPublisher {
                             };
 
                             if let Some(command) = command {
-                                // Supersede whatever is still in progress first, so a
-                                // start that keeps retrying lets go and the worker gets
-                                // to this command.
                                 let generation = next_command_generation();
 
                                 eprintln!("[CMD] Received {:?} (command #{})", command, generation);
@@ -361,7 +301,6 @@ impl MqttPublisher {
             }
         });
 
-        // Wait for connection acknowledgement
         eprintln!("[MQTT] Waiting for broker acknowledgement...");
         
         for attempt in 1..=60 {
@@ -394,9 +333,6 @@ impl MqttPublisher {
     }
 }
 
-/// Run the commands queued by the MQTT event loop, one at a time and in the
-/// order they came in, answering each on the feedback topic. `generation` is
-/// what lets a newer command cut short a start that is still retrying.
 fn run_control_commands(
     commands: mpsc::Receiver<(u64, ControlCommand)>,
     client: Client,
@@ -443,9 +379,6 @@ fn run_control_commands(
     eprintln!("[CMD] Command queue closed, command worker stopping");
 }
 
-/// Run one command against the control state and answer on the feedback topic
-/// with whatever it did. Holding the lock for the whole command is what keeps
-/// two of them from driving the control executable at the same time.
 fn run_control_command(
     client: &Client,
     topic: &str,
@@ -468,12 +401,6 @@ fn run_control_command(
     );
 }
 
-/// Stop the prosthesis because someone at the Pi asked for it rather than the
-/// server, and answer on the feedback topic all the same. `trigger` names what
-/// asked for it and `shutdown` says whether the bridge exits afterwards.
-///
-/// Only the unix signal listener calls this, but it is kept out of the `cfg`
-/// gate so it is type-checked on every host the bridge is developed on.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn stop_prosthesis_out_of_band(
     client: &Client,
@@ -485,10 +412,6 @@ fn stop_prosthesis_out_of_band(
 ) {
     eprintln!("[SIG] {} received. Stopping RoboticLegControl...", trigger);
 
-    // Kill first and take the state lock afterwards. A start that keeps
-    // retrying holds that lock for as long as it takes, and the whole point of
-    // this is that the prosthesis stops now. Superseding it is what makes it
-    // let go instead of starting the prosthesis up again behind our back.
     next_command_generation();
 
     let mut killed = ProsthesisState::On;
@@ -515,18 +438,12 @@ fn stop_prosthesis_out_of_band(
     }
 
     if shutdown {
-        // Let the event loop put the feedback on the wire before the process
-        // goes away under it.
         eprintln!("[SIG] Shutting down on {}", trigger);
         thread::sleep(SHUTDOWN_FLUSH_GRACE);
         std::process::exit(0);
     }
 }
 
-/// Stop the prosthesis whenever a stop signal comes in, so an operator at the
-/// Pi can take it down without going through the broker. `SIGUSR1` leaves the
-/// bridge running, ready to power the prosthesis on again over MQTT; `SIGINT`
-/// (Ctrl+C on a terminal) and `SIGTERM` (`systemctl stop`) stop it and exit.
 #[cfg(unix)]
 fn listen_for_stop_signals(
     client: Client,
@@ -571,8 +488,6 @@ fn listen_for_stop_signals(
     }
 }
 
-/// Signals are a unix thing; on every other host the bridge simply does not
-/// listen for them. The control executable only runs on the Pi anyway.
 #[cfg(not(unix))]
 fn listen_for_stop_signals(
     _client: Client,
@@ -583,10 +498,6 @@ fn listen_for_stop_signals(
     eprintln!("[SIG] Stop signals are only handled on unix; not listening.");
 }
 
-/// Publish the outcome of a power, gait or actuator current command on the
-/// feedback topic. `Ok` carries the success message, `Err` the failure reason;
-/// `state` and `launch` are the power state and the launch settings the bridge
-/// holds after running the command.
 fn publish_power_feedback(
     client: &Client,
     topic: &str,
@@ -613,9 +524,6 @@ fn publish_power_feedback(
     }
 }
 
-/// PIDs of the running RoboticLegControl process(es), found by command line.
-/// The `sudo` parent matches the pattern too, so this usually returns both it
-/// and the executable itself.
 fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
     let output = std::process::Command::new("pgrep")
         .arg("-f")
@@ -630,17 +538,6 @@ fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Launch the RoboticLegControl executable (`sudo <bin> --gait=<n> --I=<n>`) as
-/// a detached child and keep at it until it comes up stable: a start whose
-/// buffer does not keep reaching `HEALTHY_DATA_BYTES` is killed and tried
-/// again, for as long as it takes. Only two things end that early: the
-/// actuators turning out to be off, which no restart fixes, and a newer command
-/// coming in (`generation`), which is what the operator wants now instead.
-///
-/// We intentionally do not wait on the control loop itself: it is long-running
-/// and is later stopped by `stop_robotic_leg_control`. On success `state` is
-/// set to `On`; when the start ends without success it is set to `Off`, since
-/// every failed attempt is cleaned up.
 fn start_robotic_leg_control(
     state: &mut ProsthesisState,
     launch: LaunchSettings,
@@ -657,9 +554,6 @@ fn start_robotic_leg_control(
     loop {
         attempt += 1;
 
-        // A newer command beats a start that is on its way up. For a stop
-        // signal in particular, whatever was running is already killed, so
-        // starting another one here would undo exactly what was asked for.
         if superseded(generation) {
             *state = ProsthesisState::Off;
 
@@ -691,16 +585,9 @@ fn start_robotic_leg_control(
             failure.message()
         );
 
-        // Whatever is left of the failed attempt has to go before the next
-        // one, otherwise two control loops end up fighting over the hardware.
-        // This is also what takes the process down when there is not going to
-        // be a next one. `stop_robotic_leg_control` returns early when it is
-        // told the prosthesis is off, so give it a local `On`.
         let mut leftover = ProsthesisState::On;
 
         match stop_robotic_leg_control(&mut leftover) {
-            // Logged even when it found nothing to do: a cleanup that quietly
-            // killed nothing is exactly the case worth seeing in the journal.
             Ok(stop_message) => eprintln!(
                 "[CMD] Cleaned up after failed startup attempt {}: {}",
                 attempt, stop_message
@@ -744,8 +631,6 @@ fn start_robotic_leg_control(
     }
 }
 
-/// Sleep for `duration`, waking early if a newer command comes in, so a start
-/// that is between attempts lets go of the prosthesis without delay.
 fn sleep_unless_superseded(duration: Duration, generation: u64) {
     let deadline = Instant::now() + duration;
 
@@ -760,11 +645,6 @@ fn sleep_unless_superseded(duration: Duration, generation: u64) {
     }
 }
 
-/// Start the control executable once and watch its stdout for what it reports
-/// about the hardware. Its output keeps being forwarded to our own stdout for
-/// as long as it runs; only the beginning of it is inspected. Fails when the
-/// process dies right away, when a maxon drive does not answer, or when the
-/// buffer never reaches `HEALTHY_DATA_BYTES`.
 fn spawn_and_verify_robotic_leg_control(
     launch: LaunchSettings,
     generation: u64,
@@ -799,10 +679,6 @@ fn spawn_and_verify_robotic_leg_control(
 
     let startup = watch_startup(&reports_receiver, generation);
 
-    // `spawn` only reports that the process was launched: `sudo` can still exit
-    // right away (missing binary, missing permission). The watch window already
-    // gave it a moment, so it is enough to look once, and a process that died
-    // explains a failed watch better than the watch itself does.
     match child.try_wait() {
         Ok(Some(status)) => {
             return Err(StartFailure::Retryable(format!(
@@ -822,10 +698,6 @@ fn spawn_and_verify_robotic_leg_control(
     if let Err(failure) = startup {
         eprintln!("[CMD] {}", failure.message());
 
-        // Take the process down by the pid we already have. The sweep in
-        // `start_robotic_leg_control` runs afterwards and is what confirms it
-        // is gone, but the takedown itself must not depend on finding a
-        // process we already know the pid of.
         for error in signal_control_pids(&[pid.to_string()], "TERM") {
             eprintln!("[CMD] {}", error);
         }
@@ -833,8 +705,6 @@ fn spawn_and_verify_robotic_leg_control(
         return Err(failure);
     }
 
-    // Nothing waits on the control loop from here on, so hand the child to a
-    // thread that reaps it whenever it eventually exits.
     thread::spawn(move || {
         let _ = child.wait();
     });
@@ -847,26 +717,10 @@ fn spawn_and_verify_robotic_leg_control(
     ))
 }
 
-/// Judge a startup by the cycle that says the prosthesis is working: the buffer
-/// fills up to exactly `HEALTHY_DATA_BYTES`, and the very next report is 0.
-/// That cycle has to keep going for `STARTUP_STABILIZATION`, never going
-/// `STARTUP_WATCH_WINDOW` without completing, before the start counts as
-/// healthy. A single report that breaks it fails the start on the spot: a
-/// buffer past 52 (it overflowed instead of being read out), or a 52 followed
-/// by anything but 0 (it reached 52 and was still not read out).
-///
-/// Also fails the moment a maxon drive turns out not to answer, and gives up as
-/// soon as a newer command than `generation` comes in. The clock only starts on
-/// the first report, so the CAN and maxon initialization before it does not
-/// count against the prosthesis; reporting nothing at all within
-/// `STARTUP_STREAM_TIMEOUT` is a bad startup of its own.
 fn watch_startup(
     reports: &mpsc::Receiver<StartupReport>,
     generation: u64,
 ) -> Result<(), StartFailure> {
-    // Until the buffer is reported at all, the overall timeout is what limits
-    // the wait. From then on a cycle has to complete before each deadline,
-    // which moves forward every time one does.
     let mut deadline = Instant::now() + STARTUP_STREAM_TIMEOUT;
     let mut stable_since: Option<Instant> = None;
     let mut previous: Option<u64> = None;
@@ -880,7 +734,6 @@ fn watch_startup(
 
         let now = Instant::now();
 
-        // Checked before stability, so a gap right at the end still fails.
         if now >= deadline {
             break;
         }
@@ -898,8 +751,6 @@ fn watch_startup(
                 data_reports += 1;
 
                 if data_reports == 1 {
-                    // The buffer is being reported now, so this is where the
-                    // watch window starts.
                     deadline = Instant::now() + STARTUP_WATCH_WINDOW;
                 }
 
@@ -920,17 +771,12 @@ fn watch_startup(
                 previous = Some(size);
             }
             Ok(StartupReport::UnresponsiveDrive(axis)) => {
-                // Actuators that are switched off are not something the bridge
-                // fixes by starting the control loop again, so say so and stop
-                // here instead of restarting it forever.
                 return Err(StartFailure::Fatal(format!(
                     "maxon drive on axis {} did not answer: its actuators are most likely switched off",
                     axis
                 )));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            // The process closed its stdout, which it only does on the way
-            // out. Decided by what was seen so far.
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -957,10 +803,6 @@ fn watch_startup(
     )))
 }
 
-/// Forward the control executable's stdout to our own, line by line, reporting
-/// what the startup check cares about on `reports` along the way. The thread
-/// lives as long as the process does: once the startup check drops its receiver
-/// the sends fail silently and only the forwarding goes on.
 fn forward_robotic_leg_control_stdout(
     stdout: std::process::ChildStdout,
     reports: mpsc::Sender<StartupReport>,
@@ -984,10 +826,6 @@ fn forward_robotic_leg_control_stdout(
     }
 }
 
-/// Read the `<n>` out of a `Data bytes available <n>, out = 0.` line. Every
-/// other line the control executable prints (its initialization text, for one)
-/// yields `None`. The report is looked up anywhere in the line, since the
-/// control executable does not always start a line for it.
 fn parse_data_bytes_available(line: &str) -> Option<u64> {
     const REPORT_PREFIX: &str = "Data bytes available";
 
@@ -998,10 +836,6 @@ fn parse_data_bytes_available(line: &str) -> Option<u64> {
     size.trim().parse().ok()
 }
 
-/// Read the axis out of a `[maxon] no <n> NAO respondeu.` line, which is how
-/// the control executable says a maxon drive never answered on the CAN bus.
-/// The axis is only for the message: a line saying a drive did not answer is
-/// caught whether or not the axis can be read out of it.
 fn parse_unresponsive_drive(line: &str) -> Option<String> {
     const DRIVE_PREFIX: &str = "[maxon] no ";
 
@@ -1017,10 +851,6 @@ fn parse_unresponsive_drive(line: &str) -> Option<String> {
     Some(axis.to_string())
 }
 
-/// Find the running RoboticLegControl process(es) by command line and kill
-/// them. The executable is started via `sudo`, so it runs as root and must be
-/// killed with `sudo kill`. On success `state` is set to `Off`; on failure it
-/// is left untouched.
 fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, String> {
     if *state == ProsthesisState::Off {
         return Ok("RoboticLegControl is already stopped".to_string());
@@ -1033,13 +863,8 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
         return Ok("no running RoboticLegControl process found, already stopped".to_string());
     }
 
-    // A failed `kill` call is only a problem if the process survived it, so the
-    // end state is what decides success or failure here, not these errors.
     let mut kill_errors = signal_control_pids(&pids, "TERM");
 
-    // Termination is not instant, so keep looking rather than judging on a
-    // single glance. Processes that sit through `SIGTERM` get `SIGKILL`: the
-    // point of this function is that the prosthesis ends up stopped.
     let survivors = match wait_for_control_processes_to_exit(KILL_ESCALATION_DELAY)? {
         None => Vec::new(),
         Some(survivors) => {
@@ -1071,10 +896,6 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
     ))
 }
 
-/// Send a signal to each pid with `sudo kill`, since the control executable
-/// runs as root. The returned strings are what went wrong, if anything;
-/// whether the processes actually went away is decided by looking for them
-/// afterwards, not by these exit statuses.
 fn signal_control_pids(pids: &[String], signal: &str) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
 
@@ -1105,8 +926,6 @@ fn signal_control_pids(pids: &[String], signal: &str) -> Vec<String> {
     errors
 }
 
-/// Wait for every RoboticLegControl process to go away. `Ok(None)` means they
-/// are gone, `Ok(Some(pids))` the ones still standing when `timeout` ran out.
 fn wait_for_control_processes_to_exit(
     timeout: Duration,
 ) -> Result<Option<Vec<String>>, String> {
@@ -1128,9 +947,6 @@ fn wait_for_control_processes_to_exit(
     }
 }
 
-/// Apply a gait or actuator current command: stop the control executable and
-/// start it again with the requested settings. A failure on the way stops the
-/// restart, leaving `state` at whatever the last successful step set it to.
 fn restart_robotic_leg_control(
     state: &mut ProsthesisState,
     launch: LaunchSettings,
