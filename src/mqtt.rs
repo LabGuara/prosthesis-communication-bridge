@@ -567,14 +567,7 @@ fn start_robotic_leg_control(
             Ok(message) => {
                 *state = ProsthesisState::On;
 
-                return Ok(if failed_attempts == 0 {
-                    message
-                } else {
-                    format!(
-                        "{} (after {} failed attempts; the last one: {})",
-                        message, failed_attempts, last_failure
-                    )
-                });
+                return Ok(message);
             }
             Err(failure) => failure,
         };
