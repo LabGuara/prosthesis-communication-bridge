@@ -547,8 +547,6 @@ fn start_robotic_leg_control(
         return Ok("RoboticLegControl is already running".to_string());
     }
 
-    let mut failed_attempts: u32 = 0;
-    let mut last_failure = String::new();
     let mut attempt: u32 = 0;
 
     loop {
@@ -592,26 +590,16 @@ fn start_robotic_leg_control(
         }
 
         match failure {
-            StartFailure::Fatal(message) => {
+            StartFailure::Fatal(_) => {
                 *state = ProsthesisState::Off;
 
-                return Err(format!(
-                    "RoboticLegControl cannot start and starting again would not help: {}",
-                    message
-                ));
+                return Err(format!("RoboticLegControl cannot start"));
             }
             StartFailure::Superseded => {
                 *state = ProsthesisState::Off;
-
-                return Err(format!(
-                    "start abandoned during attempt {}: a newer command came in",
-                    attempt
-                ));
+                return Err(format!("Startup retried"));
             }
-            StartFailure::Retryable(message) => {
-                failed_attempts += 1;
-                last_failure = message;
-            }
+            StartFailure::Retryable(_) => {}
         }
 
         eprintln!(
