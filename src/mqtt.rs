@@ -11,14 +11,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const POWER_ON: u32 = 16;
-const POWER_OFF: u32 = 17;
+const COMMAND_TYPE_GAIT_MODE: u64 = 1;
+const COMMAND_TYPE_POWER: u64 = 2;
+const COMMAND_TYPE_ACTUATOR_CURRENT: u64 = 3;
 
-const MIN_GAIT_MODE: u32 = 1;
-const MAX_GAIT_MODE: u32 = 9;
+const POWER_ON: u64 = 1;
+const POWER_OFF: u64 = 2;
 
-const MIN_ACTUATOR_CURRENT: u32 = 3000;
-const MAX_ACTUATOR_CURRENT: u32 = 15000;
+const MIN_GAIT_MODE: u64 = 1;
+const MAX_GAIT_MODE: u64 = 9;
+
+const MIN_ACTUATOR_CURRENT: u64 = 3000;
+const MAX_ACTUATOR_CURRENT: u64 = 15000;
 
 const DEFAULT_GAIT_MODE: u8 = 1;
 const DEFAULT_ACTUATOR_CURRENT: u16 = 3000;
@@ -76,6 +80,53 @@ enum ControlCommand {
     PowerOff,
     SetGait(u8),
     SetActuatorCurrent(u16),
+}
+
+fn parse_control_command(payload: &str) -> Result<ControlCommand, String> {
+    let message: serde_json::Value = serde_json::from_str(payload.trim())
+        .map_err(|e| format!("not valid JSON: {}", e))?;
+
+    let command_type = read_unsigned_field(&message, "command_type")?;
+    let value = read_unsigned_field(&message, "value")?;
+
+    match command_type {
+        COMMAND_TYPE_GAIT_MODE => {
+            if (MIN_GAIT_MODE..=MAX_GAIT_MODE).contains(&value) {
+                Ok(ControlCommand::SetGait(value as u8))
+            } else {
+                Err(format!(
+                    "gait mode out of range ({}-{}): {}",
+                    MIN_GAIT_MODE, MAX_GAIT_MODE, value
+                ))
+            }
+        }
+        COMMAND_TYPE_POWER => match value {
+            POWER_ON => Ok(ControlCommand::PowerOn),
+            POWER_OFF => Ok(ControlCommand::PowerOff),
+            other => Err(format!(
+                "unknown power value (expected {} or {}): {}",
+                POWER_ON, POWER_OFF, other
+            )),
+        },
+        COMMAND_TYPE_ACTUATOR_CURRENT => {
+            if (MIN_ACTUATOR_CURRENT..=MAX_ACTUATOR_CURRENT).contains(&value) {
+                Ok(ControlCommand::SetActuatorCurrent(value as u16))
+            } else {
+                Err(format!(
+                    "actuator current out of range ({}-{}): {}",
+                    MIN_ACTUATOR_CURRENT, MAX_ACTUATOR_CURRENT, value
+                ))
+            }
+        }
+        other => Err(format!("unknown command type: {}", other)),
+    }
+}
+
+fn read_unsigned_field(message: &serde_json::Value, key: &str) -> Result<u64, String> {
+    message
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("missing or non-integer field: {}", key))
 }
 
 enum StartupReport {
@@ -255,24 +306,10 @@ impl MqttPublisher {
                         if p.topic == commands_topic {
                             let payload_str = String::from_utf8_lossy(&p.payload);
 
-                            let command = match payload_str.trim().parse::<u32>() {
-                                Ok(POWER_ON) => Some(ControlCommand::PowerOn),
-                                Ok(POWER_OFF) => Some(ControlCommand::PowerOff),
-                                Ok(value) if (MIN_GAIT_MODE..=MAX_GAIT_MODE).contains(&value) => {
-                                    Some(ControlCommand::SetGait(value as u8))
-                                }
-                                Ok(value)
-                                    if (MIN_ACTUATOR_CURRENT..=MAX_ACTUATOR_CURRENT)
-                                        .contains(&value) =>
-                                {
-                                    Some(ControlCommand::SetActuatorCurrent(value as u16))
-                                }
-                                Ok(value) => {
-                                    eprintln!("[CMD] Ignoring unknown command {}", value);
-                                    None
-                                }
-                                Err(_) => {
-                                    eprintln!("[MQTT] Failed to parse command payload {:?} as a number", payload_str);
+                            let command = match parse_control_command(&payload_str) {
+                                Ok(command) => Some(command),
+                                Err(reason) => {
+                                    eprintln!("[CMD] Ignoring command {:?}: {}", payload_str, reason);
                                     None
                                 }
                             };

@@ -36,16 +36,25 @@ The Pi updater also accepts `GITHUB_TOKEN` for private repositories. Use a token
 
 ## Commands
 
-Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` as a bare decimal number, and the value says what it is:
+Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` in the same JSON format the app publishes and the orchestrator validates:
 
-| Value | Command | Handling |
-| --- | --- | --- |
-| `16` | power on | starts the `RoboticLegControl` executable |
-| `17` | power off | stops it |
-| `1`-`9` | gait mode | restarts it with `--gait=<value>` |
-| `3000`-`15000` | actuator current | restarts it with `--I=<value>` |
+```json
+{
+  "timestamp": "2026-08-17T12:00:00+00:00",
+  "command_type": 2,
+  "value": 1
+}
+```
 
-The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a power command that is already satisfied is a no-op. It also remembers the gait mode and the actuator current, so each restart keeps whatever the other one was last set to; until a command says otherwise they are `1` and `3000`, the control executable's own defaults. Anything outside these ranges is logged and ignored rather than started: a restart on a value nobody can interpret is worse than no restart.
+`command_type` alone says what the command is; `value` is only checked against the range that type accepts:
+
+| `command_type` | Command | `value` | Handling |
+| --- | --- | --- | --- |
+| `1` | gait mode | `1`-`9` | restarts `RoboticLegControl` with `--gait=<value>` |
+| `2` | power | `1` on, `2` off | starts or stops `RoboticLegControl` |
+| `3` | actuator current | `3000`-`15000` | restarts `RoboticLegControl` with `--I=<value>` |
+
+The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a power command that is already satisfied is a no-op. It also remembers the gait mode and the actuator current, so each restart keeps whatever the other one was last set to; until a command says otherwise they are `1` and `3000`, the control executable's own defaults. A payload that is not this JSON, an unknown `command_type`, or a value outside the range of its type is logged and ignored rather than started: a restart on a value nobody can interpret is worse than no restart.
 
 Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 
