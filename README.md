@@ -1,6 +1,6 @@
 # prosthesis-logger-wrapper
 
-This binary wraps the prosthesis executable, forwards its stdout/stderr, and optionally publishes each log line to MQTT.
+This binary wraps the prosthesis executable: it starts and stops it on the commands it receives over MQTT, answers each command with a feedback message, and publishes the sensor readings the executable sends while a run is going. Each start of the executable that passes its startup check is a run, named by a UUID the feedback carries.
 
 ## Deployment
 
@@ -36,10 +36,11 @@ The Pi updater also accepts `GITHUB_TOKEN` for private repositories. Use a token
 
 ## Commands
 
-Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` in the same JSON format the app publishes and the orchestrator validates:
+Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` in the same JSON format the app publishes, plus the id the orchestrator stored the command under:
 
 ```json
 {
+  "command_id": 42,
   "timestamp": "2026-08-17T12:00:00+00:00",
   "command_type": 2,
   "value": 1
@@ -54,23 +55,50 @@ Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` in the same JSON format the 
 | `2` | power | `1` on, `2` off | starts or stops `RoboticLegControl` |
 | `3` | actuator current | `3000`-`15000` | restarts `RoboticLegControl` with `--I=<value>` |
 
+`command_id` is echoed in the feedback so the orchestrator can link the two; a command without it is still carried out, and its feedback carries `null`.
+
 The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a power command that is already satisfied is a no-op. It also remembers the gait mode and the actuator current, so each restart keeps whatever the other one was last set to; until a command says otherwise they are `1` and `3000`, the control executable's own defaults. A payload that is not this JSON, an unknown `command_type`, or a value outside the range of its type is logged and ignored rather than started: a restart on a value nobody can interpret is worse than no restart.
 
 Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 
 ```json
 {
-  "timestamp": "2026-08-17T12:00:00+00:00",
+  "timestamp": "2026-08-17T12:00:04+00:00",
+  "command_id": 42,
+  "origin": "remote",
+  "run_id": "3f2b8c1e-5a4d-4c7e-9b1a-2d6f0e8c4a17",
   "command": "set_actuator_current",
   "status": "success",
   "state": "on",
   "gait": 1,
   "current": 5000,
-  "message": "stopped RoboticLegControl (pids 1234, 1235); started RoboticLegControl with gait 1 and current 5000 (sudo pid 1287), buffer steadily cycling 52 -> 0 for 3s"
+  "message": "stopped RoboticLegControl (pids 1234, 1235); started RoboticLegControl with gait 1 and current 5000 (sudo pid 1287)"
 }
 ```
 
-`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `gait` and `current` are the settings the prosthesis is running with after the command. `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
+`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `origin` is `remote` for the answer to a command and `internal` for a stop the wrapper carried out on its own (see [Stopping from the Pi](#stopping-from-the-pi)), whose `command_id` is `null`. `gait` and `current` describe the program the prosthesis is running after the command, so they are `null` when it is off. `run_id` names the run the feedback belongs to (see [Runs and sensor data](#runs-and-sensor-data)). `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
+
+## Runs and sensor data
+
+A run is one start of `RoboticLegControl` that passed its [startup check](#startup-check), so every command that leaves the prosthesis running on a new program — a power on while off, a new gait, a new current — begins a new run. The wrapper names it with a UUID v4 and reports it in the `run_id` of the feedback:
+
+- the feedback of the command that started the run carries its id;
+- the feedback of the command that ended it — a power off, a failed restart, a stop from the Pi — carries the same id;
+- a gait or current change ends one run and starts the next with a single feedback, which carries the id of the new one;
+- a command that leaves the prosthesis running the same program, such as a power on while already on, carries the id of the run still going; one that finds the prosthesis already off carries `null`.
+
+A `RoboticLegControl` already running when the wrapper starts gets a run too, which no feedback has announced yet.
+
+Each batch of readings the control program sends over UDP is published on `MQTT_LOGS_TOPIC`, stamped with the time it arrived:
+
+```json
+{
+  "timestamp": "2026-08-17T12:00:05.012345+00:00",
+  "data": [{"t": 2.0125, "s": 1, "pJ": 3.4, "cJ": 512, "cJl": 512, "pP": 0.1, "cP": 80, "cPl": 80}]
+}
+```
+
+`data` is the batch as the control program sent it (as text when it is not JSON). Batches are only forwarded while there is a run: those that arrive while the prosthesis is off, while a start is still being checked, or from a start that fails are dropped. A new run only begins forwarding after its feedback is published, so the orchestrator always hears of a run before its first reading, and can file each batch under the run the last feedback told it about.
 
 ## Startup check
 
@@ -94,7 +122,7 @@ Commands run on a worker thread of their own, one at a time in the order they ar
 The prosthesis can be stopped without going through the broker, for when the leg is doing something it should not and reaching for the server is not an option. [deploy/init.sh](deploy/init.sh) installs two commands into `/usr/local/bin`, and [deploy/cleanup.sh](deploy/cleanup.sh) removes them again:
 
 - `watch-prosthesis` follows the service log — everything the wrapper prints plus the stdout of the control executable — and keeps a stop key ready while it runs: **`s` stops the prosthesis**, `q` leaves the log view without touching it. Arguments are passed on to `journalctl`, so `watch-prosthesis -n 200` works; `--plain` drops the stop key and only follows the log, which is what you want when piping the output somewhere.
-- `stop-prosthesis` stops the prosthesis now. It sends `SIGUSR1` to the wrapper process, which kills the control executable and answers on `MQTT_POWER_FEEDBACK_TOPIC` like any other power command. The wrapper stays up, so the server can power the prosthesis on again afterwards. It signals the unit's `MainPID` directly rather than using `systemctl kill`, which would deliver the signal to every process in the unit: `SIGUSR1` terminates `sudo` and the control executable outright, so they would be cut down where they stand instead of being shut down by the wrapper.
+- `stop-prosthesis` stops the prosthesis now. It sends `SIGUSR1` to the wrapper process, which kills the control executable and answers on `MQTT_POWER_FEEDBACK_TOPIC` like a power off, with `origin` `internal` and no `command_id`. The wrapper stays up, so the server can power the prosthesis on again afterwards. It signals the unit's `MainPID` directly rather than using `systemctl kill`, which would deliver the signal to every process in the unit: `SIGUSR1` terminates `sudo` and the control executable outright, so they would be cut down where they stand instead of being shut down by the wrapper.
 
 The `s` key works because `watch-prosthesis` is a program in its own right: it runs `journalctl` in the background and reads the keyboard itself, so a key press becomes a signal to the service. Terminal shortcuts cannot do the same — Ctrl+C and Ctrl+Z reach whatever is in the foreground of that terminal, which is the log viewer, never the service. It asks for the sudo password up front, if one is needed at all, so the stop key does not stop to ask at the worst possible moment.
 

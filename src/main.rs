@@ -1,5 +1,5 @@
-use std::io::{self, Read};
-use std::net::{TcpListener, UdpSocket};
+use std::io;
+use std::net::UdpSocket;
 use std::sync::Arc;
 use std::thread;
 
@@ -24,37 +24,18 @@ fn get_local_ip() -> String {
     }
 }
 
-fn listen_for_tcp_commands(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:25001")?;
-    let local_ip = get_local_ip();
-    println!("Listening for TCP commands on {}:25001", local_ip);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut socket) => {
-                let mut buffer = [0; 1024];
-                while let Ok(n) = socket.read(&mut buffer) {
-                    if n == 0 { break; } // Connection closed by client
-                    let command = String::from_utf8_lossy(&buffer[..n]);
-                    println!("Received command: {}", command.trim());
-                    if let Some(ref pub_) = publisher {
-                        pub_.publish(command.trim());
-                    }
-                }
-            }
-            Err(e) => eprintln!("Connection failed: {e}"),
-        }
-    }
-
-    Ok(())
-}
+/// Largest payload a UDP datagram can carry. A smaller buffer would silently cut a longer batch,
+/// leaving invalid JSON that the orchestrator has to discard whole. It is allocated once and
+/// reused for every datagram, and only the bytes received are read, so the size costs nothing per
+/// batch.
+const MAX_DATAGRAM_SIZE: usize = 65_535;
 
 fn listen_for_udp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:25002")?;
     let local_ip = get_local_ip();
     println!("Listening for UDP logs on {}:25002", local_ip);
 
-    let mut buffer = [0; 1024];
+    let mut buffer = vec![0u8; MAX_DATAGRAM_SIZE];
     loop {
         match socket.recv_from(&mut buffer) {
             Ok((n, _addr)) => {
@@ -77,15 +58,7 @@ fn run() -> io::Result<i32> {
         }
     };
 
-    let publisher_commands = publisher.clone();
-    let publisher_logs = publisher.clone();
-
-    let tcp_commands_thread = thread::spawn(move || listen_for_tcp_commands(publisher_commands));
-    let udp_logs_thread = thread::spawn(move || listen_for_udp_logs(publisher_logs));
-
-    let _commands_result = tcp_commands_thread
-        .join()
-        .map_err(|_| io::Error::other("TCP commands thread panicked"))?;
+    let udp_logs_thread = thread::spawn(move || listen_for_udp_logs(publisher));
 
     let _logs_result = udp_logs_thread
         .join()

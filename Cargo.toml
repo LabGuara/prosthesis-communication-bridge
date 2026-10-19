@@ -8,6 +8,7 @@ dotenv = "0.15.0"
 serde_json = "1.0.149"
 tokio = "1.52.1"
 chrono = "0.4.42"
+uuid = { version = "1", features = ["v4"] }
 
 # 1. Bring back standard rumqttc (let it pull what it wants natively)
 rumqttc = { version = "0.25.1" }

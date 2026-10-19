@@ -1,7 +1,6 @@
-use crate::models::log_level::LogLevel;
-use crate::models::log::Log;
-use crate::models::power_feedback::{PowerCommand, PowerFeedback};
+use crate::models::power_feedback::{FeedbackOrigin, PowerCommand, PowerFeedback};
 use crate::models::prosthesis_state::ProsthesisState;
+use crate::models::sensor_batch::SensorBatch;
 use crate::config::MqttConfig;
 use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
 use std::io::{BufRead, BufReader};
@@ -51,6 +50,54 @@ const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Id (a UUID v4) of the run the prosthesis is in: one start of RoboticLegControl that passed its
+/// startup check. `None` while the prosthesis is off or a start is still being checked. Sensor
+/// readings are only forwarded while there is a run, so the orchestrator can file everything it
+/// receives under the run the last feedback told it about.
+static CURRENT_RUN_ID: Mutex<Option<String>> = Mutex::new(None);
+
+fn lock_run_id() -> std::sync::MutexGuard<'static, Option<String>> {
+    CURRENT_RUN_ID
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn new_run_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Makes `run_id` the current run, which turns on forwarding of sensor readings.
+fn begin_run(run_id: String) {
+    eprintln!("[RUN] Started run {}", run_id);
+    *lock_run_id() = Some(run_id);
+}
+
+/// Called whenever RoboticLegControl is known to be stopped. Readings stop being forwarded.
+fn end_run() {
+    if let Some(run_id) = lock_run_id().take() {
+        eprintln!("[RUN] Ended run {}", run_id);
+    }
+}
+
+fn current_run_id() -> Option<String> {
+    lock_run_id().clone()
+}
+
+/// Decides the run a feedback reports, given the run that was going before the command (or stop)
+/// and the state it left the prosthesis in:
+/// - on, with a run going: that run (it kept running, e.g. a power on while already on);
+/// - on, with no run: a start that went through, so a new run. The returned flag says it still has
+///   to be begun, which happens only after its feedback is published, so the feedback reaches the
+///   broker before any reading of the new run;
+/// - off: the run the command ended, or `None` if the prosthesis was already off.
+fn feedback_run(run_before: Option<String>, state: ProsthesisState) -> (Option<String>, bool) {
+    match (state, current_run_id()) {
+        (ProsthesisState::On, Some(run_id)) => (Some(run_id), false),
+        (ProsthesisState::On, None) => (Some(new_run_id()), true),
+        (ProsthesisState::Off, _) => (run_before, false),
+    }
+}
+
 fn next_command_generation() -> u64 {
     COMMAND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
 }
@@ -82,14 +129,24 @@ enum ControlCommand {
     SetActuatorCurrent(u16),
 }
 
-fn parse_control_command(payload: &str) -> Result<ControlCommand, String> {
+/// Parses a command and the id the orchestrator stored it under, which the feedback echoes.
+/// The id is optional, so a command published without it is still carried out.
+fn parse_control_command(payload: &str) -> Result<(ControlCommand, Option<u64>), String> {
     let message: serde_json::Value = serde_json::from_str(payload.trim())
         .map_err(|e| format!("not valid JSON: {}", e))?;
 
     let command_type = read_unsigned_field(&message, "command_type")?;
     let value = read_unsigned_field(&message, "value")?;
 
-    match command_type {
+    let command_id = match message.get("command_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(id) => Some(
+            id.as_u64()
+                .ok_or_else(|| "non-integer field: command_id".to_string())?,
+        ),
+    };
+
+    let command = match command_type {
         COMMAND_TYPE_GAIT_MODE => {
             if (MIN_GAIT_MODE..=MAX_GAIT_MODE).contains(&value) {
                 Ok(ControlCommand::SetGait(value as u8))
@@ -119,7 +176,9 @@ fn parse_control_command(payload: &str) -> Result<ControlCommand, String> {
             }
         }
         other => Err(format!("unknown command type: {}", other)),
-    }
+    }?;
+
+    Ok((command, command_id))
 }
 
 fn read_unsigned_field(message: &serde_json::Value, key: &str) -> Result<u64, String> {
@@ -168,7 +227,7 @@ fn lock_control_state(control_state: &Mutex<ControlState>) -> std::sync::MutexGu
 }
 
 pub struct MqttPublisher {
-    sender: mpsc::Sender<String>,
+    sender: mpsc::Sender<SensorBatch>,
 }
 
 impl MqttPublisher {
@@ -204,7 +263,7 @@ impl MqttPublisher {
         eprintln!("[MQTT] Creating client...");
 
         let (client, connection) = Client::new(mqtt_options, 100);
-        let (sender, receiver) = mpsc::channel::<String>();
+        let (sender, receiver) = mpsc::channel::<SensorBatch>();
         
         let connected = Arc::new(Mutex::new(false));
         let connected_for_wait = connected.clone();
@@ -227,6 +286,12 @@ impl MqttPublisher {
             current: DEFAULT_ACTUATOR_CURRENT,
         }));
 
+        if lock_control_state(&control_state).prosthesis == ProsthesisState::On {
+            // A RoboticLegControl this wrapper did not start (it outlived a restart of the
+            // wrapper): it gets a run so its readings keep being forwarded.
+            begin_run(new_run_id());
+        }
+
         {
             let state = lock_control_state(&control_state);
             eprintln!(
@@ -247,7 +312,7 @@ impl MqttPublisher {
             move || listen_for_stop_signals(client, power_feedback_topic, qos, control_state)
         });
 
-        let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand)>();
+        let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand, Option<u64>)>();
 
         eprintln!("[CMD] Spawning command worker...");
 
@@ -275,15 +340,8 @@ impl MqttPublisher {
             let mut connection = connection;
 
             loop {
-                while let Ok(message) = receiver.try_recv() {
-                    let log = Log {
-                        timestamp: chrono::Utc::now(),
-                        level: LogLevel::Info,
-                        sensor_name: "prosthesis-logger".to_string(),
-                        message,
-                    };
-
-                    let json_str = log.generate_payload();
+                while let Ok(batch) = receiver.try_recv() {
+                    let json_str = batch.generate_payload();
 
                     match client.publish(&logs_topic, qos, false, json_str) {
                         Ok(_) => {},
@@ -314,12 +372,15 @@ impl MqttPublisher {
                                 }
                             };
 
-                            if let Some(command) = command {
+                            if let Some((command, command_id)) = command {
                                 let generation = next_command_generation();
 
-                                eprintln!("[CMD] Received {:?} (command #{})", command, generation);
+                                eprintln!(
+                                    "[CMD] Received {:?} (command #{}, id {:?})",
+                                    command, generation, command_id
+                                );
 
-                                if let Err(e) = commands.send((generation, command)) {
+                                if let Err(e) = commands.send((generation, command, command_id)) {
                                     eprintln!("[CMD] Command worker is gone, dropping {:?}: {:?}", command, e);
                                 }
                             }
@@ -363,21 +424,30 @@ impl MqttPublisher {
         Ok(Self { sender })
     }
 
+    /// Queues a batch of readings, stamped with the time it arrived. Batches that arrive while
+    /// there is no run (the prosthesis is off, or a start is still being checked or failed) are
+    /// dropped.
     pub fn publish(&self, message: &str) {
-        if let Err(err) = self.sender.send(message.to_string()) {
+        if current_run_id().is_none() {
+            return;
+        }
+
+        let batch = SensorBatch::new(chrono::Utc::now(), message);
+
+        if let Err(err) = self.sender.send(batch) {
             eprintln!("MQTT queue error: {err}");
         }
     }
 }
 
 fn run_control_commands(
-    commands: mpsc::Receiver<(u64, ControlCommand)>,
+    commands: mpsc::Receiver<(u64, ControlCommand, Option<u64>)>,
     client: Client,
     power_feedback_topic: String,
     qos: QoS,
     control_state: SharedControlState,
 ) {
-    for (generation, command) in commands {
+    for (generation, command, command_id) in commands {
         let feedback_command = match command {
             ControlCommand::PowerOn => PowerCommand::On,
             ControlCommand::PowerOff => PowerCommand::Off,
@@ -393,6 +463,7 @@ fn run_control_commands(
             qos,
             &control_state,
             feedback_command,
+            command_id,
             |state| match command {
                 ControlCommand::PowerOn => {
                     let launch = state.launch();
@@ -422,20 +493,32 @@ fn run_control_command(
     qos: QoS,
     control_state: &Mutex<ControlState>,
     command: PowerCommand,
+    command_id: Option<u64>,
     run: impl FnOnce(&mut ControlState) -> Result<String, String>,
 ) {
     let mut state = lock_control_state(control_state);
+    let run_before = current_run_id();
     let result = run(&mut state);
+    let (run_id, started) = feedback_run(run_before, state.prosthesis);
 
     publish_power_feedback(
         client,
         topic,
         qos,
         command,
+        command_id,
+        FeedbackOrigin::Remote,
         state.prosthesis,
         state.launch(),
+        run_id.clone(),
         result,
     );
+
+    if started {
+        if let Some(run_id) = run_id {
+            begin_run(run_id);
+        }
+    }
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -451,6 +534,7 @@ fn stop_prosthesis_out_of_band(
 
     next_command_generation();
 
+    let run_before = current_run_id();
     let mut killed = ProsthesisState::On;
     let result = stop_robotic_leg_control(&mut killed)
         .map(|message| format!("stop requested by {}: {}", trigger, message))
@@ -463,13 +547,19 @@ fn stop_prosthesis_out_of_band(
             state.prosthesis = ProsthesisState::Off;
         }
 
+        // A stop never starts a run, so there is nothing to begin afterwards.
+        let (run_id, _) = feedback_run(run_before, state.prosthesis);
+
         publish_power_feedback(
             client,
             power_feedback_topic,
             qos,
             PowerCommand::Off,
+            None,
+            FeedbackOrigin::Internal,
             state.prosthesis,
             state.launch(),
+            run_id,
             result,
         );
     }
@@ -535,24 +625,41 @@ fn listen_for_stop_signals(
     eprintln!("[SIG] Stop signals are only handled on unix; not listening.");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_power_feedback(
     client: &Client,
     topic: &str,
     qos: QoS,
     command: PowerCommand,
+    command_id: Option<u64>,
+    origin: FeedbackOrigin,
     state: ProsthesisState,
     launch: LaunchSettings,
+    run_id: Option<String>,
     result: Result<String, String>,
 ) {
-    let feedback = match result {
+    let (success, message) = match result {
         Ok(message) => {
             eprintln!("[CMD] {} succeeded: {}", command.as_str(), message);
-            PowerFeedback::success(command, state, launch.gait, launch.current, message)
+            (true, message)
         }
         Err(message) => {
             eprintln!("[CMD] {} failed: {}", command.as_str(), message);
-            PowerFeedback::failure(command, state, launch.gait, launch.current, message)
+            (false, message)
         }
+    };
+
+    let feedback = PowerFeedback {
+        timestamp: chrono::Utc::now(),
+        command,
+        command_id,
+        origin,
+        success,
+        state,
+        gait: launch.gait,
+        current: launch.current,
+        run_id,
+        message,
     };
 
     match client.publish(topic, qos, false, feedback.generate_payload()) {
@@ -591,6 +698,7 @@ fn start_robotic_leg_control(
 
         if superseded(generation) {
             *state = ProsthesisState::Off;
+            end_run();
 
             return Err(format!(
                 "start abandoned before attempt {}: a newer command came in",
@@ -629,11 +737,13 @@ fn start_robotic_leg_control(
         match failure {
             StartFailure::Fatal(_) => {
                 *state = ProsthesisState::Off;
+                end_run();
 
                 return Err(format!("RoboticLegControl cannot start"));
             }
             StartFailure::Superseded => {
                 *state = ProsthesisState::Off;
+                end_run();
                 return Err(format!("Startup retried"));
             }
             StartFailure::Retryable(_) => {}
@@ -871,6 +981,7 @@ fn parse_unresponsive_drive(line: &str) -> Option<String> {
 
 fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, String> {
     if *state == ProsthesisState::Off {
+        end_run();
         return Ok("RoboticLegControl is already stopped".to_string());
     }
 
@@ -878,6 +989,7 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
 
     if pids.is_empty() {
         *state = ProsthesisState::Off;
+        end_run();
         return Ok("no running RoboticLegControl process found, already stopped".to_string());
     }
 
@@ -900,6 +1012,7 @@ fn stop_robotic_leg_control(state: &mut ProsthesisState) -> Result<String, Strin
 
     if survivors.is_empty() {
         *state = ProsthesisState::Off;
+        end_run();
         return Ok(format!("stopped RoboticLegControl (pids {})", pids.join(", ")));
     }
 
