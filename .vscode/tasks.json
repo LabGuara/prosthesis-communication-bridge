@@ -8,19 +8,6 @@
       "args": ["build", "--bin=prosthesis-logger-wrapper"],
       "problemMatcher": ["$rustc"],
       "group": "build"
-    },
-    {
-      "label": "cargo build unit tests",
-      "detail": "Builds the test binary and stages it as target/debug/unittests.exe (with its .pdb) so launch.json has a stable path.",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-Command",
-        "$a = cargo test --no-run --bin=prosthesis-logger-wrapper --message-format=json | Where-Object { $_ -match '^\{' } | ConvertFrom-Json | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -eq $true -and $_.executable } | Select-Object -Last 1; if (-not $a) { throw 'cargo produced no test executable' }; Copy-Item $a.executable 'target/debug/unittests.exe' -Force; $pdb = [IO.Path]::ChangeExtension($a.executable, '.pdb'); if (Test-Path $pdb) { Copy-Item $pdb 'target/debug/' -Force }"
-      ],
-      "problemMatcher": ["$rustc"],
-      "group": "build"
     }
   ]
 }

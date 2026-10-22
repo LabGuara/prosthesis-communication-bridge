@@ -6,7 +6,10 @@
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "--bin=prosthesis-logger-wrapper"]
+        "args": [
+          "build",
+          "--bin=prosthesis-logger-wrapper"
+        ]
       }
     },
     {
@@ -17,14 +20,6 @@
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/deploy/pi/.env"
-    },
-    {
-      "name": "Debug unit tests in executable 'prosthesis-logger-wrapper'",
-      "type": "lldb",
-      "request": "launch",
-      "cargo": {
-        "args": ["test", "--bin=prosthesis-logger-wrapper"]
-      }
     }
   ]
 }
