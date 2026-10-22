@@ -2,6 +2,7 @@ use crate::models::power_feedback::{FeedbackOrigin, PowerCommand, PowerFeedback}
 use crate::models::prosthesis_state::ProsthesisState;
 use crate::models::sensor_batch::SensorBatch;
 use crate::config::MqttConfig;
+use crate::mock::MockProsthesis;
 use rumqttc::{Client, MqttOptions, QoS, Transport, RecvTimeoutError};
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,6 +48,10 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const KILL_ESCALATION_DELAY: Duration = Duration::from_secs(3);
 
 const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_secs(1);
+
+/// Longest the MQTT event loop waits for a network event. A queued sensor batch does not wake it,
+/// so this is also the longest a batch can wait to be published.
+pub const EVENT_LOOP_WAIT: Duration = Duration::from_secs(2);
 
 static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -226,16 +231,94 @@ fn lock_control_state(control_state: &Mutex<ControlState>) -> std::sync::MutexGu
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// What the commands drive: the real prosthesis, through RoboticLegControl, or a simulated one
+/// (`--mock`) whose every command succeeds. Run bookkeeping and feedback are the same for both.
+#[derive(Clone)]
+pub enum Prosthesis {
+    Real,
+    Mock(Arc<MockProsthesis>),
+}
+
+impl Prosthesis {
+    /// Whether the control program is already running when the bridge starts.
+    fn is_running(&self) -> bool {
+        match self {
+            Prosthesis::Real => matches!(robotic_leg_control_pids(), Ok(pids) if !pids.is_empty()),
+            Prosthesis::Mock(_) => false,
+        }
+    }
+
+    fn start(
+        &self,
+        state: &mut ProsthesisState,
+        launch: LaunchSettings,
+        generation: u64,
+    ) -> Result<String, String> {
+        let mock = match self {
+            Prosthesis::Real => return start_robotic_leg_control(state, launch, generation),
+            Prosthesis::Mock(mock) => mock,
+        };
+
+        if *state == ProsthesisState::On {
+            return Ok("the simulated prosthesis is already running".to_string());
+        }
+
+        if !mock.start(launch.gait, launch.current) {
+            *state = ProsthesisState::Off;
+            end_run();
+            return Err("the simulated prosthesis was stopped while starting".to_string());
+        }
+
+        *state = ProsthesisState::On;
+
+        Ok(format!(
+            "started the simulated prosthesis with gait {} and current {}",
+            launch.gait, launch.current
+        ))
+    }
+
+    fn stop(&self, state: &mut ProsthesisState) -> Result<String, String> {
+        let mock = match self {
+            Prosthesis::Real => return stop_robotic_leg_control(state),
+            Prosthesis::Mock(mock) => mock,
+        };
+
+        let was_running = mock.stop();
+        *state = ProsthesisState::Off;
+        end_run();
+
+        Ok(if was_running {
+            "stopped the simulated prosthesis".to_string()
+        } else {
+            "the simulated prosthesis is already stopped".to_string()
+        })
+    }
+
+    fn restart(
+        &self,
+        state: &mut ProsthesisState,
+        launch: LaunchSettings,
+        generation: u64,
+    ) -> Result<String, String> {
+        let stop_message = self.stop(state)?;
+        let start_message = self.start(state, launch, generation)?;
+        Ok(format!("{}; {}", stop_message, start_message))
+    }
+}
+
 pub struct MqttPublisher {
     sender: mpsc::Sender<SensorBatch>,
 }
 
 impl MqttPublisher {
-    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new(MqttConfig::from_env())
+    pub fn from_env(prosthesis: Prosthesis) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(MqttConfig::from_env(), prosthesis)
     }
 
-    pub fn new(config: MqttConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        config: MqttConfig,
+        prosthesis: Prosthesis,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let username = config.username.clone();
         let password = config.password.clone();
         let use_tls = config.tls;
@@ -278,9 +361,10 @@ impl MqttPublisher {
         };
 
         let control_state: SharedControlState = Arc::new(Mutex::new(ControlState {
-            prosthesis: match robotic_leg_control_pids() {
-                Ok(pids) if !pids.is_empty() => ProsthesisState::On,
-                _ => ProsthesisState::Off,
+            prosthesis: if prosthesis.is_running() {
+                ProsthesisState::On
+            } else {
+                ProsthesisState::Off
             },
             gait: DEFAULT_GAIT_MODE,
             current: DEFAULT_ACTUATOR_CURRENT,
@@ -308,8 +392,11 @@ impl MqttPublisher {
             let client = client.clone();
             let power_feedback_topic = power_feedback_topic.clone();
             let control_state = control_state.clone();
+            let prosthesis = prosthesis.clone();
 
-            move || listen_for_stop_signals(client, power_feedback_topic, qos, control_state)
+            move || {
+                listen_for_stop_signals(client, power_feedback_topic, qos, control_state, prosthesis)
+            }
         });
 
         let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand, Option<u64>)>();
@@ -328,6 +415,7 @@ impl MqttPublisher {
                     power_feedback_topic,
                     qos,
                     control_state,
+                    prosthesis,
                 )
             }
         });
@@ -349,7 +437,7 @@ impl MqttPublisher {
                     }
                 }
 
-                match connection.recv_timeout(Duration::from_secs(2)) {
+                match connection.recv_timeout(EVENT_LOOP_WAIT) {
                     Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::ConnAck(_)))) => {
                         eprintln!("[MQTT] Connected!");
                         let mut state = connected_for_wait.lock().unwrap();
@@ -446,6 +534,7 @@ fn run_control_commands(
     power_feedback_topic: String,
     qos: QoS,
     control_state: SharedControlState,
+    prosthesis: Prosthesis,
 ) {
     for (generation, command, command_id) in commands {
         let feedback_command = match command {
@@ -467,18 +556,18 @@ fn run_control_commands(
             |state| match command {
                 ControlCommand::PowerOn => {
                     let launch = state.launch();
-                    start_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                    prosthesis.start(&mut state.prosthesis, launch, generation)
                 }
-                ControlCommand::PowerOff => stop_robotic_leg_control(&mut state.prosthesis),
+                ControlCommand::PowerOff => prosthesis.stop(&mut state.prosthesis),
                 ControlCommand::SetGait(gait) => {
                     state.gait = gait;
                     let launch = state.launch();
-                    restart_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                    prosthesis.restart(&mut state.prosthesis, launch, generation)
                 }
                 ControlCommand::SetActuatorCurrent(current) => {
                     state.current = current;
                     let launch = state.launch();
-                    restart_robotic_leg_control(&mut state.prosthesis, launch, generation)
+                    prosthesis.restart(&mut state.prosthesis, launch, generation)
                 }
             },
         );
@@ -527,6 +616,7 @@ fn stop_prosthesis_out_of_band(
     power_feedback_topic: &str,
     qos: QoS,
     control_state: &Mutex<ControlState>,
+    prosthesis: &Prosthesis,
     trigger: &str,
     shutdown: bool,
 ) {
@@ -536,7 +626,8 @@ fn stop_prosthesis_out_of_band(
 
     let run_before = current_run_id();
     let mut killed = ProsthesisState::On;
-    let result = stop_robotic_leg_control(&mut killed)
+    let result = prosthesis
+        .stop(&mut killed)
         .map(|message| format!("stop requested by {}: {}", trigger, message))
         .map_err(|message| format!("stop requested by {}: {}", trigger, message));
 
@@ -577,6 +668,7 @@ fn listen_for_stop_signals(
     power_feedback_topic: String,
     qos: QoS,
     control_state: SharedControlState,
+    prosthesis: Prosthesis,
 ) {
     use signal_hook::consts::{SIGINT, SIGTERM, SIGUSR1};
     use signal_hook::iterator::Signals;
@@ -609,6 +701,7 @@ fn listen_for_stop_signals(
             &power_feedback_topic,
             qos,
             &control_state,
+            &prosthesis,
             trigger,
             signal != SIGUSR1,
         );
@@ -621,6 +714,7 @@ fn listen_for_stop_signals(
     _power_feedback_topic: String,
     _qos: QoS,
     _control_state: SharedControlState,
+    _prosthesis: Prosthesis,
 ) {
     eprintln!("[SIG] Stop signals are only handled on unix; not listening.");
 }
@@ -1076,14 +1170,4 @@ fn wait_for_control_processes_to_exit(
             return Ok(Some(remaining));
         }
     }
-}
-
-fn restart_robotic_leg_control(
-    state: &mut ProsthesisState,
-    launch: LaunchSettings,
-    generation: u64,
-) -> Result<String, String> {
-    let stop_message = stop_robotic_leg_control(state)?;
-    let start_message = start_robotic_leg_control(state, launch, generation)?;
-    Ok(format!("{}; {}", stop_message, start_message))
 }

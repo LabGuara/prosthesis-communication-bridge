@@ -13,6 +13,20 @@
       }
     },
     {
+      "name": "Debug executable 'prosthesis-logger-wrapper' (mock)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=prosthesis-logger-wrapper"
+        ]
+      },
+      "args": [
+        "--mock"
+      ]
+    },
+    {
       "name": "Debug updater 'update-binary.py'",
       "type": "debugpy",
       "request": "launch",

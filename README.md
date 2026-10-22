@@ -136,6 +136,26 @@ The wrapper handles three signals, and every one of them answers on the feedback
 
 A stop signal also cancels a start that is still retrying, so the prosthesis is not brought back up by a start that was already on its way.
 
+## Mock mode
+
+`--mock` runs the bridge without a prosthesis, e.g. on a development computer, to exercise the app and the orchestrator end to end:
+
+```bash
+cargo run -- --mock
+```
+
+Commands, feedback and runs work as described above, but `RoboticLegControl` is never started:
+
+- Every command that is carried out succeeds, and its feedback says the prosthesis is simulated (`started the simulated prosthesis with gait 2 and current 5000`). A start takes 2.5 s, standing in for the [startup check](#startup-check); a stop takes 0.1 s. A payload the bridge cannot interpret is still ignored.
+- While the simulated prosthesis is on, made-up readings are sent to the bridge's own UDP port the way `send_sensor_data.m` sends them: batches of 7 samples at 80 Hz, two decimals per channel, the clock starting at 0 on every start — so, as with the real prosthesis, the first reading forwarded is from about 2.5 s on. They follow the gait mode (a gait cycle with its microstates for walking, stairs and slopes, slow sway for standing and sitting, repeated transfers for sit-to-stand and stand-to-sit), and `cJl` and `cPl` are `cJ` and `cP` clamped to the actuator current, so both commands show in the data. The shapes are only meant to look plausible.
+- The simulated prosthesis is off when the bridge starts. Stop signals work as in [Stopping from the Pi](#stopping-from-the-pi) (unix only); one that comes in during a start fails it, as it would the real one.
+
+A mock bridge on the same broker as the real one makes both answer every command, so stop the real one first or point the mock elsewhere. Variables already set in the environment take precedence over `.env`; for a local Mosquitto, in PowerShell:
+
+```powershell
+$env:MQTT_HOST="localhost"; $env:MQTT_PORT="1883"; $env:MQTT_TLS="false"; cargo run -- --mock
+```
+
 ## Notes
 
 - The workflow currently targets Raspberry Pi OS 64-bit (`aarch64-unknown-linux-musl`). If your Pi is running 32-bit OS, the target should be changed before relying on the release artifacts.
