@@ -28,10 +28,10 @@ impl MqttConfig {
                 .unwrap_or(1883),
 
             logs_topic: env::var("MQTT_LOGS_TOPIC")
-                .unwrap_or_else(|_| "prosthesis/logs/raw".to_string()),
+                .unwrap_or_else(|_| "prosthesis/logs".to_string()),
 
-            commands_topic: env::var("MQTT_COMMAND_LOGS_PARSED_TOPIC")
-                .unwrap_or_else(|_| "prosthesis/actions/parsed".to_string()),
+            commands_topic: env::var("MQTT_COMMAND_LOGS_VALIDATED_TOPIC")
+                .unwrap_or_else(|_| "prosthesis/actions/validated".to_string()),
 
             power_feedback_topic: env::var("MQTT_POWER_FEEDBACK_TOPIC")
                 .unwrap_or_else(|_| "prosthesis/actions/feedback".to_string()),

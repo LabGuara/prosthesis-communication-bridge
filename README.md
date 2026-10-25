@@ -24,7 +24,7 @@ The wrapper reads these variables from the environment or from a local `.env` fi
 - `MQTT_HOST`
 - `MQTT_PORT`
 - `MQTT_LOGS_TOPIC`
-- `MQTT_COMMAND_LOGS_PARSED_TOPIC`
+- `MQTT_COMMAND_LOGS_VALIDATED_TOPIC`
 - `MQTT_POWER_FEEDBACK_TOPIC`
 - `MQTT_QOS`
 - `MQTT_CLIENT_ID`
@@ -36,7 +36,7 @@ The Pi updater also accepts `GITHUB_TOKEN` for private repositories. Use a token
 
 ## Commands
 
-Commands arrive on `MQTT_COMMAND_LOGS_PARSED_TOPIC` in the same JSON format the app publishes, plus the id the orchestrator stored the command under:
+Commands arrive on `MQTT_COMMAND_LOGS_VALIDATED_TOPIC` in the same JSON format the app publishes, plus the id the orchestrator stored the command under:
 
 ```json
 {
