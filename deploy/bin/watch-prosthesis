@@ -1,12 +1,4 @@
 #!/bin/bash
-#
-# Follow the prosthesis bridge log with a stop key ready: everything the wrapper
-# prints plus the stdout of the control executable it supervises, with "s"
-# stopping the prosthesis on the spot and "q" leaving the log view.
-#
-# Extra arguments go to journalctl, so `watch-prosthesis -n 200` works. Pass
-# `--plain` to only follow the log without the stop key, which is what you want
-# when piping the output somewhere else.
 
 set -u
 

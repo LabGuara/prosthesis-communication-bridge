@@ -41,8 +41,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable prosthesis-communication-bridge
 echo "Service enabled (will start on boot)"
 
-# Install the wrapper binary before starting the service.
-echo "Installing wrapper binary..."
+# Install the communication bridge binary before starting the service.
+echo "Installing communication bridge binary..."
 sudo python3 "$UPDATE_SCRIPT"
 
 # Start the service now
