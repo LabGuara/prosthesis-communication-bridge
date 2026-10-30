@@ -42,7 +42,7 @@ load_env_file(Path(__file__).resolve().with_name(".env"))
 
 REPO = os.environ.get("REPO", "mateus-sartorio/prosthesis-communication-bridge")
 INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prosthesis-communication-bridge"))
-SERVICE_NAME = os.environ.get("SERVICE_NAME", "prosthesis-logger")
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "prosthesis-communication-bridge")
 ASSET_NAME = os.environ.get("ASSET_NAME", "prosthesis-communication-bridge-linux-aarch64.tar.gz")
 GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -50,7 +50,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 def github_headers(accept: str) -> dict[str, str]:
     headers = {
-        "User-Agent": "prosthesis-logger-updater",
+        "User-Agent": "prosthesis-communication-bridge-updater",
         "Accept": accept,
     }
 
@@ -88,7 +88,7 @@ def main() -> int:
     release_dir = INSTALL_ROOT
     release_dir.mkdir(parents=True, exist_ok=True)
 
-    installed_release_path = release_dir / "prosthesis-logger-release" 
+    installed_release_path = release_dir / "prosthesis-communication-bridge-release" 
     if installed_release_path.exists() and installed_release_path.read_text(encoding="utf-8").strip() == release_tag:
         print(f"Already at latest release: {release_tag}")
         return 0

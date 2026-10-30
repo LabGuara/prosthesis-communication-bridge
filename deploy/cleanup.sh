@@ -7,7 +7,7 @@ UPDATE_SCRIPT="$SCRIPT_DIR/update-binary.py"
 COMMANDS_DIR="$SCRIPT_DIR/bin"
 COMMANDS_INSTALL_DIR="/usr/local/bin"
 
-echo "Stopping and removing prosthesis-logger service..."
+echo "Stopping and removing prosthesis-communication-bridge service..."
 
 # Stop the service
 echo "Stopping service..."

@@ -97,7 +97,7 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            eprintln!("prosthesis-logger error: {err}");
+            eprintln!("prosthesis-communication-bridge error: {err}");
             std::process::exit(1);
         }
     }

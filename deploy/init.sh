@@ -10,7 +10,7 @@ ENVIRONMENT_FILE="/etc/prosthesis-communication-bridge.env"
 COMMANDS_DIR="$SCRIPT_DIR/bin"
 COMMANDS_INSTALL_DIR="/usr/local/bin"
 
-echo "Setting up prosthesis-logger..."
+echo "Setting up prosthesis-communication-bridge..."
 
 # Ensure the deploy directory and files are readable by the service
 echo "Setting permissions..."
