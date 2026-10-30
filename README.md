@@ -1,4 +1,4 @@
-# prosthesis-logger-wrapper
+# prosthesis-communication-bridge
 
 This binary wraps the prosthesis executable: it starts and stops it on the commands it receives over MQTT, answers each command with a feedback message, and publishes the sensor readings the executable sends while a run is going. Each start of the executable that passes its startup check is a run, named by a UUID the feedback carries.
 
@@ -7,15 +7,15 @@ This binary wraps the prosthesis executable: it starts and stops it on the comma
 The first deployment path is GitHub Actions plus a Raspberry Pi update script.
 
 - The workflow in [.github/workflows/release.yml](.github/workflows/release.yml) builds a Linux `aarch64` release on every push to `main` and publishes a GitHub Release asset.
-- The Pi-side updater in [deploy/update-binary.py](deploy/update-binary.py) downloads the latest release asset, installs it under `/opt/prosthesis-logger-wrapper`, updates a `current` symlink, and restarts systemd.
-- The systemd unit template in [deploy/prosthesis-logger-wrapper.service](deploy/prosthesis-logger-wrapper.service) is a starting point. Edit `ExecStart` so it launches the actual prosthesis executable and arguments you want the wrapper to supervise.
+- The Pi-side updater in [deploy/update-binary.py](deploy/update-binary.py) downloads the latest release asset, installs it under `/opt/prosthesis-communication-bridge`, updates a `current` symlink, and restarts systemd.
+- The systemd unit template in [deploy/prosthesis-communication-bridge.service](deploy/prosthesis-communication-bridge.service) is a starting point. Edit `ExecStart` so it launches the actual prosthesis executable and arguments you want the wrapper to supervise.
 
 ## Raspberry Pi setup
 
-1. Copy the systemd unit template to `/etc/systemd/system/prosthesis-logger-wrapper.service`.
-2. Create `/etc/prosthesis-logger-wrapper.env` with the MQTT settings you want on the Pi.
-3. Install the wrapper with `sudo REPO=your-org/prosthesis-logger-wrapper python3 deploy/update-binary.py`.
-4. Enable the service with `sudo systemctl enable --now prosthesis-logger-wrapper`.
+1. Copy the systemd unit template to `/etc/systemd/system/prosthesis-communication-bridge.service`.
+2. Create `/etc/prosthesis-communication-bridge.env` with the MQTT settings you want on the Pi.
+3. Install the wrapper with `sudo REPO=your-org/prosthesis-communication-bridge python3 deploy/update-binary.py`.
+4. Enable the service with `sudo systemctl enable --now prosthesis-communication-bridge`.
 
 ## Environment variables
 
@@ -132,7 +132,7 @@ The wrapper handles three signals, and every one of them answers on the feedback
 | --- | --- | --- |
 | `SIGUSR1` | `stop-prosthesis` | Kills the control executable (`SIGTERM`, then `SIGKILL` after 3s); the wrapper keeps running. |
 | `SIGINT` | Ctrl+C, when run in a terminal instead of under systemd | Kills the control executable, then exits. |
-| `SIGTERM` | `systemctl stop prosthesis-logger-wrapper` | Kills the control executable, then exits. |
+| `SIGTERM` | `systemctl stop prosthesis-communication-bridge` | Kills the control executable, then exits. |
 
 A stop signal also cancels a start that is still retrying, so the prosthesis is not brought back up by a start that was already on its way.
 
@@ -159,4 +159,4 @@ $env:MQTT_HOST="localhost"; $env:MQTT_PORT="1883"; $env:MQTT_TLS="false"; cargo 
 ## Notes
 
 - The workflow currently targets Raspberry Pi OS 64-bit (`aarch64-unknown-linux-musl`). If your Pi is running 32-bit OS, the target should be changed before relying on the release artifacts.
-- The updater keeps each release under a versioned directory and flips `/opt/prosthesis-logger-wrapper/current` to the newest one.
+- The updater keeps each release under a versioned directory and flips `/opt/prosthesis-communication-bridge/current` to the newest one.

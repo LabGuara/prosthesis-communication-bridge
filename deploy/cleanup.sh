@@ -11,15 +11,15 @@ echo "Stopping and removing prosthesis-logger service..."
 
 # Stop the service
 echo "Stopping service..."
-sudo systemctl stop prosthesis-logger-wrapper
+sudo systemctl stop prosthesis-communication-bridge
 
 # Disable the service (prevent it from starting on boot)
 echo "Disabling service..."
-sudo systemctl disable prosthesis-logger-wrapper
+sudo systemctl disable prosthesis-communication-bridge
 
 # Remove the service file
 echo "Removing service file..."
-sudo rm -f /etc/systemd/system/prosthesis-logger-wrapper.service
+sudo rm -f /etc/systemd/system/prosthesis-communication-bridge.service
 sudo systemctl daemon-reload
 
 # Remove the operator commands installed by init.sh

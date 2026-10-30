@@ -5,7 +5,7 @@
       "label": "cargo build",
       "type": "shell",
       "command": "cargo",
-      "args": ["build", "--bin=prosthesis-logger-wrapper"],
+      "args": ["build", "--bin=prosthesis-communication-bridge"],
       "problemMatcher": ["$rustc"],
       "group": "build"
     }

@@ -1,5 +1,5 @@
 [package]
-name = "prosthesis-logger-wrapper"
+name = "prosthesis-communication-bridge"
 version = "0.1.0"
 edition = "2024"
 

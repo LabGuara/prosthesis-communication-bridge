@@ -4,9 +4,9 @@ set -e  # Exit on error
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SERVICE_FILE="$SCRIPT_DIR/prosthesis-logger-wrapper.service"
+SERVICE_FILE="$SCRIPT_DIR/prosthesis-communication-bridge.service"
 UPDATE_SCRIPT="$SCRIPT_DIR/update-binary.py"
-ENVIRONMENT_FILE="/etc/prosthesis-logger-wrapper.env"
+ENVIRONMENT_FILE="/etc/prosthesis-communication-bridge.env"
 COMMANDS_DIR="$SCRIPT_DIR/bin"
 COMMANDS_INSTALL_DIR="/usr/local/bin"
 
@@ -38,7 +38,7 @@ done
 echo "Setting up systemd service..."
 sudo cp "$SERVICE_FILE" /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable prosthesis-logger-wrapper
+sudo systemctl enable prosthesis-communication-bridge
 echo "Service enabled (will start on boot)"
 
 # Install the wrapper binary before starting the service.
@@ -47,14 +47,14 @@ sudo python3 "$UPDATE_SCRIPT"
 
 # Start the service now
 echo "Starting service..."
-sudo systemctl start prosthesis-logger-wrapper
+sudo systemctl start prosthesis-communication-bridge
 echo "Service started"
 
 echo ""
 echo "Setup complete!"
 echo ""
 echo "Verify with:"
-echo "  sudo systemctl status prosthesis-logger-wrapper"
+echo "  sudo systemctl status prosthesis-communication-bridge"
 echo ""
 echo "Follow the logs with (press 's' there to stop the prosthesis):"
 echo "  watch-prosthesis"

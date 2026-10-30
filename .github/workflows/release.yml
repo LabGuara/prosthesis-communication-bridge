@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TARGET: aarch64-unknown-linux-musl
-      ARTIFACT_NAME: prosthesis-logger-wrapper-linux-aarch64
-      BINARY_NAME: prosthesis-logger-wrapper
+      ARTIFACT_NAME: prosthesis-communication-bridge-linux-aarch64
+      BINARY_NAME: prosthesis-communication-bridge
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,4 +55,4 @@ jobs:
           name: build-${{ github.run_number }}
           generate_release_notes: true
           files: |
-            prosthesis-logger-wrapper-linux-aarch64.tar.gz
+            prosthesis-communication-bridge-linux-aarch64.tar.gz

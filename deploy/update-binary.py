@@ -41,9 +41,9 @@ load_env_file(Path(__file__).resolve().with_name(".env"))
 
 
 REPO = os.environ.get("REPO", "mateus-sartorio/prosthesis-communication-bridge")
-INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prosthesis-logger-wrapper"))
+INSTALL_ROOT = Path(os.environ.get("INSTALL_ROOT", "/opt/prosthesis-communication-bridge"))
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "prosthesis-logger")
-ASSET_NAME = os.environ.get("ASSET_NAME", "prosthesis-logger-wrapper-linux-aarch64.tar.gz")
+ASSET_NAME = os.environ.get("ASSET_NAME", "prosthesis-communication-bridge-linux-aarch64.tar.gz")
 GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
@@ -106,7 +106,7 @@ def main() -> int:
     print(f"Downloaded and extracted {REPO}@{release_tag} to {release_dir}")
 
     # Restart the service to pick up the new binary
-    subprocess.run(["systemctl", "restart", "prosthesis-logger-wrapper"], check=True)
+    subprocess.run(["systemctl", "restart", "prosthesis-communication-bridge"], check=True)
 
     return 0
 

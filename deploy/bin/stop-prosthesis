@@ -7,7 +7,7 @@
 
 set -e
 
-SERVICE="prosthesis-logger-wrapper"
+SERVICE="prosthesis-communication-bridge"
 
 main_pid="$(systemctl show -p MainPID --value "$SERVICE")"
 

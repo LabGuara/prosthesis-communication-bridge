@@ -42,7 +42,7 @@ impl MqttConfig {
                 .unwrap_or(1),
 
             client_id: {
-                let base = env::var("MQTT_CLIENT_ID").unwrap_or_else(|_| "prosthesis-logger-wrapper".to_string());
+                let base = env::var("MQTT_CLIENT_ID").unwrap_or_else(|_| "prosthesis-communication-bridge".to_string());
                 format!("{}-{}", base, std::process::id())
             },
 

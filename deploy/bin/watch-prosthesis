@@ -10,7 +10,7 @@
 
 set -u
 
-SERVICE="prosthesis-logger-wrapper"
+SERVICE="prosthesis-communication-bridge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Installed next to this script by init.sh; fall back to PATH otherwise.

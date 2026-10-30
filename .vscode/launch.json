@@ -2,24 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug executable 'prosthesis-logger-wrapper'",
+      "name": "Debug executable 'prosthesis-communication-bridge'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
         "args": [
           "build",
-          "--bin=prosthesis-logger-wrapper"
+          "--bin=prosthesis-communication-bridge"
         ]
       }
     },
     {
-      "name": "Debug executable 'prosthesis-logger-wrapper' (mock)",
+      "name": "Debug executable 'prosthesis-communication-bridge' (mock)",
       "type": "lldb",
       "request": "launch",
       "cargo": {
         "args": [
           "build",
-          "--bin=prosthesis-logger-wrapper"
+          "--bin=prosthesis-communication-bridge"
         ]
       },
       "args": [
