@@ -1,53 +1,23 @@
-//! Mock mode (`--mock`): a stand-in for the prosthesis, for running the bridge on a computer that
-//! has none.
-//!
-//! Commands are answered as if RoboticLegControl had started or stopped, always successfully (see
-//! `Prosthesis::Mock` in mqtt.rs). While the simulated program runs, this module
-//! plays its part in the data path: it sends batches of made-up readings to the bridge's UDP port,
-//! formatted like `send_sensor_data.m` does, so they reach MQTT through the same listener and the
-//! same run bookkeeping as real ones.
-//!
-//! The readings follow the gait mode the program was started with (a gait cycle for walking,
-//! stairs and slopes; slow sway for standing and sitting; repeated transfers for sit-to-stand and
-//! stand-to-sit), with a little noise and stride-to-stride variation. The limited currents are the
-//! raw ones clamped to the actuator current the program was started with, so a current command
-//! shows up in the data. The shapes are only meant to look plausible on a chart, not to be
-//! biomechanically exact.
-
 use std::f64::consts::TAU;
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::mqtt::EVENT_LOOP_WAIT;
+use super::{LaunchSettings, Prosthesis};
 
-/// Readings per batch, as in `send_sensor_data.m`.
 const BATCH_SIZE: usize = 7;
 
-/// `send_sensor_data.m` sends its whole buffer: the batch, padded with spaces up to this size.
 const DATAGRAM_SIZE: usize = 4000;
 
-/// Step of the simulated control loop, in seconds (80 Hz).
 const SAMPLE_PERIOD: f64 = 0.0125;
 
-/// How long a start takes. Like the startup check of RoboticLegControl, which takes three seconds,
-/// it lets the bridge publish every reading of the previous run before the feedback that begins
-/// the next one: a reading can wait up to `EVENT_LOOP_WAIT` to be published. What the program
-/// sends meanwhile is dropped, its run not having begun, so the first reading forwarded is not at
-/// t = 0, as with the real prosthesis.
-const STARTUP_DURATION: Duration = EVENT_LOOP_WAIT.saturating_add(Duration::from_millis(500));
+const STARTUP_DURATION: Duration = Duration::from_secs(3);
 
-/// How long a stop takes. Readings already on their way reach the bridge within it, while their
-/// run is still going.
 const STOP_DURATION: Duration = Duration::from_millis(100);
 
-/// Further behind schedule than this (e.g. after the computer slept), the readings carry on from
-/// now instead of catching up in a burst.
 const MAX_LAG: Duration = Duration::from_secs(1);
 
-/// What the simulated RoboticLegControl was started with. `id` tells one start from the next, so
-/// each start's readings begin at t = 0, as the clock of a freshly started program does.
 #[derive(Clone, Copy, Debug)]
 struct Program {
     id: u64,
@@ -66,8 +36,6 @@ pub struct MockProsthesis {
 }
 
 impl MockProsthesis {
-    /// Creates the simulated prosthesis, switched off, and the thread that sends its readings to
-    /// `127.0.0.1:<udp_port>` while it runs.
     pub fn spawn(udp_port: u16) -> Arc<Self> {
         let mock = Arc::new(Self {
             programs: Mutex::new(Programs::default()),
@@ -81,49 +49,64 @@ impl MockProsthesis {
         mock
     }
 
-    /// Starts the simulated RoboticLegControl, whose readings begin right away at t = 0, and
-    /// returns once the start is through: `false` if the program was stopped meanwhile, which
-    /// only a stop signal can do, since commands run one at a time.
-    pub fn start(&self, gait: u8, current: u16) -> bool {
+    fn lock(&self) -> MutexGuard<'_, Programs> {
+        self.programs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Prosthesis for MockProsthesis {
+    fn name(&self) -> &'static str {
+        "the simulated prosthesis"
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn start(&self, launch: LaunchSettings, _superseded: &dyn Fn() -> bool) -> Result<String, String> {
         let id = {
             let mut programs = self.lock();
             programs.starts += 1;
             programs.running = Some(Program {
                 id: programs.starts,
-                gait,
-                current,
+                gait: launch.gait,
+                current: launch.current,
             });
             programs.starts
         };
 
         eprintln!(
             "[MOCK] Simulated RoboticLegControl started (gait {}, current {}), up in {}ms",
-            gait,
-            current,
+            launch.gait,
+            launch.current,
             STARTUP_DURATION.as_millis()
         );
 
         thread::sleep(STARTUP_DURATION);
 
-        self.lock().running.is_some_and(|program| program.id == id)
-    }
-
-    /// Stops the simulated RoboticLegControl. Returns whether it was running.
-    pub fn stop(&self) -> bool {
-        let was_running = self.lock().running.take().is_some();
-
-        if was_running {
-            eprintln!("[MOCK] Simulated RoboticLegControl stopped");
-            thread::sleep(STOP_DURATION);
+        if !self.lock().running.is_some_and(|program| program.id == id) {
+            return Err("the simulated prosthesis was stopped while starting".to_string());
         }
 
-        was_running
+        Ok(format!(
+            "started the simulated prosthesis with gait {} and current {}",
+            launch.gait, launch.current
+        ))
     }
 
-    fn lock(&self) -> MutexGuard<'_, Programs> {
-        self.programs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn stop(&self) -> Result<String, String> {
+        let was_running = self.lock().running.take().is_some();
+
+        if !was_running {
+            return Ok("the simulated prosthesis is already stopped".to_string());
+        }
+
+        eprintln!("[MOCK] Simulated RoboticLegControl stopped");
+        thread::sleep(STOP_DURATION);
+
+        Ok("stopped the simulated prosthesis".to_string())
     }
 }
 
@@ -150,7 +133,6 @@ fn stream_readings(mock: &MockProsthesis, udp_port: u16) {
             next_batch = now;
         }
 
-        // Held while the batch is sent, so once `stop` returns the stopped program sends nothing.
         let programs = mock.lock();
 
         let Some(program) = programs.running else {
@@ -172,25 +154,19 @@ fn stream_readings(mock: &MockProsthesis, udp_port: u16) {
     }
 }
 
-/// One sample, with the channels `send_sensor_data.m` sends.
 #[derive(Clone, Copy, Debug)]
 struct Reading {
-    /// Microstate of the gait state machine.
     state: f64,
-    /// Clock of the control program, in seconds since it started.
     t: f64,
-    /// Knee angle (°), current (mA) and current after the limit (mA).
     knee: f64,
     knee_current: f64,
     knee_current_limited: f64,
-    /// Foot (ankle) angle (°), current (mA) and current after the limit (mA).
     ankle: f64,
     ankle_current: f64,
     ankle_current_limited: f64,
 }
 
 impl Reading {
-    /// The same JSON object, with the same two decimals, as the `sprintf` of `send_sensor_data.m`.
     fn to_json(self) -> String {
         format!(
             "{{\"s\":{:.2},\"t\":{:.2},\"pJ\":{:.2},\"cJ\":{:.2},\"cJl\":{:.2},\"pP\":{:.2},\"cP\":{:.2},\"cPl\":{:.2}}}",
@@ -206,16 +182,12 @@ impl Reading {
     }
 }
 
-/// The readings of one start of the simulated program.
 struct Simulator {
     program_id: u64,
     activity: Activity,
     current_limit: f64,
     step: u64,
-    /// Where the current cycle is, from 0 to 1.
     phase: f64,
-    /// Length of the current cycle (s) and how pronounced it is: both vary a little from one
-    /// cycle to the next, as strides do.
     cycle_period: f64,
     cycle_gain: f64,
     rng: Rng,
@@ -237,8 +209,6 @@ impl Simulator {
         }
     }
 
-    /// A batch as the control program sends it: a JSON array of `BATCH_SIZE` readings, padded
-    /// with spaces to `DATAGRAM_SIZE` bytes.
     fn next_datagram(&mut self) -> String {
         let readings: Vec<String> = (0..BATCH_SIZE)
             .map(|_| self.next_reading().to_json())
@@ -276,7 +246,6 @@ impl Simulator {
     }
 }
 
-/// The gait modes, numbered as in the app and in RoboticLegControl (`--gait=<n>`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Activity {
     Walking,
@@ -305,7 +274,6 @@ impl Activity {
         }
     }
 
-    /// Average length of one cycle, in seconds.
     fn cycle_period(self) -> f64 {
         match self {
             Activity::Standing => 8.0,
@@ -345,8 +313,6 @@ struct Pose {
     ankle_current: f64,
 }
 
-/// A bell on the cycle: `amp` at phase `at`, `width` cycles wide (its standard deviation). It
-/// wraps around, so the end of one cycle flows into the next.
 #[derive(Clone, Copy, Debug)]
 struct Bump {
     amp: f64,
@@ -369,10 +335,8 @@ fn bumps(bumps: &[Bump], phase: f64) -> f64 {
     bumps.iter().map(|b| b.at_phase(phase)).sum()
 }
 
-/// One gait cycle (a stride), starting at heel strike.
 struct Stride {
     period: f64,
-    /// The microstates in order: each lasts until the phase it is paired with.
     states: &'static [(f64, f64)],
     knee: (f64, &'static [Bump]),
     ankle: (f64, &'static [Bump]),
@@ -399,10 +363,8 @@ impl Stride {
     }
 }
 
-/// Microstates of level and sloped walking: early, mid and late stance, pre-swing, swing.
 const WALKING_STATES: &[(f64, f64)] = &[(0.15, 1.0), (0.40, 2.0), (0.50, 2.5), (0.62, 3.0), (1.0, 4.0)];
 
-/// Microstates of stair ascent and descent.
 const STAIR_STATES: &[(f64, f64)] = &[(0.20, 1.0), (0.45, 2.0), (0.60, 3.0), (1.0, 4.0)];
 
 const WALKING: Stride = Stride {
@@ -450,7 +412,6 @@ const DOWNSLOPE_WALKING: Stride = Stride {
     ankle_current: &[bump(1800.0, 0.08, 0.04), bump(-3000.0, 0.55, 0.06)],
 };
 
-/// Standing still, shifting weight now and then.
 fn standing(phase: f64, gain: f64) -> Pose {
     let angle = TAU * phase;
 
@@ -463,7 +424,6 @@ fn standing(phase: f64, gain: f64) -> Pose {
     }
 }
 
-/// Seated, the leg swaying a little.
 fn sitting(phase: f64, gain: f64) -> Pose {
     let angle = TAU * phase;
 
@@ -476,8 +436,6 @@ fn sitting(phase: f64, gain: f64) -> Pose {
     }
 }
 
-/// Sitting, standing up, standing, sitting down again, over and over. The sit-to-stand and
-/// stand-to-sit modes are fixed impedances without a state machine, so the microstate stays 1.
 fn transfer(phase: f64, gain: f64, rise_current: f64, lower_current: f64) -> Pose {
     let standing = smoothstep(0.30, 0.50, phase) - smoothstep(0.80, 1.0, phase);
 
@@ -497,7 +455,6 @@ fn smoothstep(from: f64, to: f64, x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// xorshift64*: enough to make the readings look alive, without a dependency for it.
 struct Rng(u64);
 
 impl Rng {
@@ -505,7 +462,6 @@ impl Rng {
         Self(uuid::Uuid::new_v4().as_u128() as u64 | 1)
     }
 
-    /// Uniform in [0, 1).
     fn unit(&mut self) -> f64 {
         let mut x = self.0;
         x ^= x >> 12;
@@ -515,7 +471,6 @@ impl Rng {
         (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Between -amplitude and amplitude, most of it near 0.
     fn noise(&mut self, amplitude: f64) -> f64 {
         (self.unit() + self.unit() - 1.0) * amplitude
     }

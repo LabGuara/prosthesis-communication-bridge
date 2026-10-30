@@ -1,12 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-/// A batch of readings from RoboticLegControl, as forwarded to the orchestrator.
 #[derive(Clone, Debug)]
 pub struct SensorBatch {
-    /// When the bridge received the batch.
     pub timestamp: DateTime<Utc>,
-    /// The readings as the control program sent them: JSON when they parse, text otherwise.
     pub data: Value,
 }
 

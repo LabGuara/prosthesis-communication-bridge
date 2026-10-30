@@ -3,16 +3,15 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::thread;
 
-use crate::mock::MockProsthesis;
-use crate::mqtt::{MqttPublisher, Prosthesis};
+use crate::mqtt::MqttPublisher;
+use crate::prosthesis::{MockProsthesis, Prosthesis, RealProsthesis};
 
 mod config;
-mod mock;
 mod mqtt;
 mod models;
+mod prosthesis;
 
-/// Port RoboticLegControl sends its sensor batches to.
-const UDP_LOGS_PORT: u16 = 25002;
+const UDP_LOGS_PORT: u16 = 25000;
 
 fn get_local_ip() -> String {
     match UdpSocket::bind("0.0.0.0:0") {
@@ -29,10 +28,6 @@ fn get_local_ip() -> String {
     }
 }
 
-/// Largest payload a UDP datagram can carry. A smaller buffer would silently cut a longer batch,
-/// leaving invalid JSON that the orchestrator has to discard whole. It is allocated once and
-/// reused for every datagram, and only the bytes received are read, so the size costs nothing per
-/// batch.
 const MAX_DATAGRAM_SIZE: usize = 65_535;
 
 fn listen_for_udp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> {
@@ -54,8 +49,6 @@ fn listen_for_udp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> 
     }
 }
 
-/// Whether the command line asks for mock mode. Other arguments are reported and ignored, so a
-/// service that passes some keeps running as before.
 fn mock_requested() -> bool {
     let mut mock = false;
 
@@ -70,15 +63,15 @@ fn mock_requested() -> bool {
 }
 
 fn run() -> io::Result<i32> {
-    let prosthesis = if mock_requested() {
+    let prosthesis: Arc<dyn Prosthesis> = if mock_requested() {
         eprintln!(
             "[MOCK] Mock mode: the prosthesis is simulated. Commands always succeed without starting \
              RoboticLegControl, and made-up sensor readings are sent to UDP port {}.",
             UDP_LOGS_PORT
         );
-        Prosthesis::Mock(MockProsthesis::spawn(UDP_LOGS_PORT))
+        MockProsthesis::spawn(UDP_LOGS_PORT)
     } else {
-        Prosthesis::Real
+        Arc::new(RealProsthesis)
     };
 
     let publisher = match MqttPublisher::from_env(prosthesis) {
