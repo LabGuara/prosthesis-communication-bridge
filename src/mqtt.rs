@@ -565,7 +565,6 @@ fn stop_prosthesis_out_of_band(
             state.prosthesis = ProsthesisState::Off;
         }
 
-        // A stop never starts a run, so there is nothing to begin afterwards.
         let (run, _) = feedback_run(run_before, state.prosthesis, None);
 
         publish_power_feedback(

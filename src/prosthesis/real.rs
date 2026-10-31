@@ -1,5 +1,3 @@
-//! The real prosthesis: RoboticLegControl, started and stopped as a process on the Pi.
-
 use std::io::{BufRead, BufReader};
 use std::sync::mpsc;
 use std::thread;
