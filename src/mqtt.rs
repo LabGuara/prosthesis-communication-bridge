@@ -35,7 +35,7 @@ static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug)]
 struct Run {
     id: String,
-    collection_id: Option<String>,
+    collect_id: Option<String>,
 }
 
 static CURRENT_RUN: Mutex<Option<Run>> = Mutex::new(None);
@@ -46,12 +46,12 @@ fn lock_run() -> std::sync::MutexGuard<'static, Option<Run>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn new_run(collection_id: Option<String>) -> Run {
-    Run { id: uuid::Uuid::new_v4().to_string(), collection_id }
+fn new_run(collect_id: Option<String>) -> Run {
+    Run { id: uuid::Uuid::new_v4().to_string(), collect_id }
 }
 
 fn begin_run(run: Run) {
-    eprintln!("[RUN] Started run {} (collection {:?})", run.id, run.collection_id);
+    eprintln!("[RUN] Started run {} (collect {:?})", run.id, run.collect_id);
     *lock_run() = Some(run);
 }
 
@@ -68,11 +68,11 @@ fn current_run() -> Option<Run> {
 fn feedback_run(
     run_before: Option<Run>,
     state: ProsthesisState,
-    collection_id: Option<String>,
+    collect_id: Option<String>,
 ) -> (Option<Run>, bool) {
     match (state, current_run()) {
         (ProsthesisState::On, Some(run)) => (Some(run), false),
-        (ProsthesisState::On, None) => (Some(new_run(collection_id)), true),
+        (ProsthesisState::On, None) => (Some(new_run(collect_id)), true),
         (ProsthesisState::Off, _) => (run_before, false),
     }
 }
@@ -140,16 +140,16 @@ fn parse_control_command(payload: &str) -> Result<(ControlCommand, Option<u64>, 
         other => Err(format!("unknown command type: {}", other)),
     }?;
 
-    Ok((command, command_id, parse_collection_id(&message)))
+    Ok((command, command_id, parse_collect_id(&message)))
 }
 
-fn parse_collection_id(message: &serde_json::Value) -> Option<String> {
-    match message.get("collection_id") {
+fn parse_collect_id(message: &serde_json::Value) -> Option<String> {
+    match message.get("collect_id") {
         None | Some(serde_json::Value::Null) => None,
         Some(value) => match value.as_str().and_then(|id| uuid::Uuid::parse_str(id.trim()).ok()) {
             Some(id) => Some(id.to_string()),
             None => {
-                eprintln!("[CMD] Ignoring malformed collection_id {}; the command is kept", value);
+                eprintln!("[CMD] Ignoring malformed collect_id {}; the command is kept", value);
                 None
             }
         },
@@ -386,15 +386,15 @@ impl MqttPublisher {
                                 }
                             };
 
-                            if let Some((command, command_id, collection_id)) = command {
+                            if let Some((command, command_id, collect_id)) = command {
                                 let generation = next_command_generation();
 
                                 eprintln!(
-                                    "[CMD] Received {:?} (command #{}, id {:?}, collection {:?})",
-                                    command, generation, command_id, collection_id
+                                    "[CMD] Received {:?} (command #{}, id {:?}, collect {:?})",
+                                    command, generation, command_id, collect_id
                                 );
 
-                                if let Err(e) = commands.send((generation, command, command_id, collection_id)) {
+                                if let Err(e) = commands.send((generation, command, command_id, collect_id)) {
                                     eprintln!("[CMD] Command worker is gone, dropping {:?}: {:?}", command, e);
                                 }
                             }
@@ -461,7 +461,7 @@ fn run_control_commands(
 ) {
     let prosthesis = prosthesis.as_ref();
 
-    for (generation, command, command_id, collection_id) in commands {
+    for (generation, command, command_id, collect_id) in commands {
         let feedback_command = match command {
             ControlCommand::PowerOn => PowerCommand::On,
             ControlCommand::PowerOff => PowerCommand::Off,
@@ -478,7 +478,7 @@ fn run_control_commands(
             &control_state,
             feedback_command,
             command_id,
-            collection_id,
+            collect_id,
             |state| match command {
                 ControlCommand::PowerOn => {
                     let launch = state.launch();
@@ -510,13 +510,13 @@ fn run_control_command(
     control_state: &Mutex<ControlState>,
     command: PowerCommand,
     command_id: Option<u64>,
-    collection_id: Option<String>,
+    collect_id: Option<String>,
     run: impl FnOnce(&mut ControlState) -> Result<String, String>,
 ) {
     let mut state = lock_control_state(control_state);
     let run_before = current_run();
     let result = run(&mut state);
-    let (run_after, started) = feedback_run(run_before, state.prosthesis, collection_id);
+    let (run_after, started) = feedback_run(run_before, state.prosthesis, collect_id);
 
     publish_power_feedback(
         client,
@@ -659,8 +659,8 @@ fn publish_power_feedback(
     run: Option<Run>,
     result: Result<String, String>,
 ) {
-    let (run_id, collection_id) = match run {
-        Some(run) => (Some(run.id), run.collection_id),
+    let (run_id, collect_id) = match run {
+        Some(run) => (Some(run.id), run.collect_id),
         None => (None, None),
     };
 
@@ -685,7 +685,7 @@ fn publish_power_feedback(
         gait: launch.gait,
         current: launch.current,
         run_id,
-        collection_id,
+        collect_id,
         message,
     };
 

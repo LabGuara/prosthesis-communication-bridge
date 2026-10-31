@@ -48,7 +48,7 @@ pub struct PowerFeedback {
     pub gait: u8,
     pub current: u16,
     pub run_id: Option<String>,
-    pub collection_id: Option<String>,
+    pub collect_id: Option<String>,
     pub message: String,
 }
 
@@ -61,7 +61,7 @@ impl PowerFeedback {
             "command_id": self.command_id,
             "origin": self.origin.as_str(),
             "run_id": self.run_id,
-            "collection_id": self.collection_id,
+            "collect_id": self.collect_id,
             "command": self.command.as_str(),
             "status": if self.success { "success" } else { "failure" },
             "state": self.state.as_str(),

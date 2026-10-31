@@ -44,7 +44,7 @@ Commands arrive on `MQTT_COMMAND_LOGS_VALIDATED_TOPIC` in the same JSON format t
   "timestamp": "2026-08-17T12:00:00+00:00",
   "command_type": 2,
   "value": 1,
-  "collection_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+  "collect_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
 }
 ```
 
@@ -58,7 +58,7 @@ Commands arrive on `MQTT_COMMAND_LOGS_VALIDATED_TOPIC` in the same JSON format t
 
 `command_id` is echoed in the feedback so the orchestrator can link the two; a command without it is still carried out, and its feedback carries `null`.
 
-`collection_id` is the data collection the app had open when it sent the command, or `null`. It does not change what the command does: the wrapper only files the run the command starts under it (see [Runs and sensor data](#runs-and-sensor-data)). A `collection_id` that is not a UUID is logged and dropped, never the command, since a stop must not be ignored over bookkeeping.
+`collect_id` is the collect the app had open when it sent the command, or `null`. It does not change what the command does: the wrapper only files the run the command starts under it (see [Runs and sensor data](#runs-and-sensor-data)). A `collect_id` that is not a UUID is logged and dropped, never the command, since a stop must not be ignored over bookkeeping.
 
 The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a power command that is already satisfied is a no-op. It also remembers the gait mode and the actuator current, so each restart keeps whatever the other one was last set to; until a command says otherwise they are `1` and `3000`, the control executable's own defaults. A payload that is not this JSON, an unknown `command_type`, or a value outside the range of its type is logged and ignored rather than started: a restart on a value nobody can interpret is worse than no restart.
 
@@ -70,7 +70,7 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
   "command_id": 42,
   "origin": "remote",
   "run_id": "3f2b8c1e-5a4d-4c7e-9b1a-2d6f0e8c4a17",
-  "collection_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+  "collect_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
   "command": "set_actuator_current",
   "status": "success",
   "state": "on",
@@ -80,7 +80,7 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 }
 ```
 
-`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `origin` is `remote` for the answer to a command and `internal` for a stop the wrapper carried out on its own (see [Stopping from the Pi](#stopping-from-the-pi)), whose `command_id` is `null`. `gait` and `current` describe the program the prosthesis is running after the command, so they are `null` when it is off. `run_id` names the run the feedback belongs to and `collection_id` the data collection of that run (see [Runs and sensor data](#runs-and-sensor-data)). `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
+`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `origin` is `remote` for the answer to a command and `internal` for a stop the wrapper carried out on its own (see [Stopping from the Pi](#stopping-from-the-pi)), whose `command_id` is `null`. `gait` and `current` describe the program the prosthesis is running after the command, so they are `null` when it is off. `run_id` names the run the feedback belongs to and `collect_id` the collect of that run (see [Runs and sensor data](#runs-and-sensor-data)). `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
 
 ## Runs and sensor data
 
@@ -93,7 +93,7 @@ A run is one start of `RoboticLegControl` that passed its [startup check](#start
 
 A `RoboticLegControl` already running when the wrapper starts gets a run too, which no feedback has announced yet.
 
-A run belongs to the data collection of the command that started it, and every feedback that names the run carries that collection as `collection_id`, including the one that ends it. A run started outside a collection, or already running when the wrapper starts, has `null`. Only the command that starts a run sets its collection: a power on that finds a run still going reports the collection that run started in.
+A run belongs to the collect of the command that started it, and every feedback that names the run carries that collect as `collect_id`, including the one that ends it. A run started outside a collect, or already running when the wrapper starts, has `null`. Only the command that starts a run sets its collect: a power on that finds a run still going reports the collect that run started in.
 
 Each batch of readings the control program sends over UDP is published on `MQTT_LOGS_TOPIC`, stamped with the time it arrived:
 
