@@ -32,37 +32,47 @@ const EVENT_LOOP_WAIT: Duration = Duration::from_secs(2);
 
 static COMMAND_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-static CURRENT_RUN_ID: Mutex<Option<String>> = Mutex::new(None);
+#[derive(Clone, Debug)]
+struct Run {
+    id: String,
+    collection_id: Option<String>,
+}
 
-fn lock_run_id() -> std::sync::MutexGuard<'static, Option<String>> {
-    CURRENT_RUN_ID
+static CURRENT_RUN: Mutex<Option<Run>> = Mutex::new(None);
+
+fn lock_run() -> std::sync::MutexGuard<'static, Option<Run>> {
+    CURRENT_RUN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn new_run_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+fn new_run(collection_id: Option<String>) -> Run {
+    Run { id: uuid::Uuid::new_v4().to_string(), collection_id }
 }
 
-fn begin_run(run_id: String) {
-    eprintln!("[RUN] Started run {}", run_id);
-    *lock_run_id() = Some(run_id);
+fn begin_run(run: Run) {
+    eprintln!("[RUN] Started run {} (collection {:?})", run.id, run.collection_id);
+    *lock_run() = Some(run);
 }
 
 fn end_run() {
-    if let Some(run_id) = lock_run_id().take() {
-        eprintln!("[RUN] Ended run {}", run_id);
+    if let Some(run) = lock_run().take() {
+        eprintln!("[RUN] Ended run {}", run.id);
     }
 }
 
-fn current_run_id() -> Option<String> {
-    lock_run_id().clone()
+fn current_run() -> Option<Run> {
+    lock_run().clone()
 }
 
-fn feedback_run(run_before: Option<String>, state: ProsthesisState) -> (Option<String>, bool) {
-    match (state, current_run_id()) {
-        (ProsthesisState::On, Some(run_id)) => (Some(run_id), false),
-        (ProsthesisState::On, None) => (Some(new_run_id()), true),
+fn feedback_run(
+    run_before: Option<Run>,
+    state: ProsthesisState,
+    collection_id: Option<String>,
+) -> (Option<Run>, bool) {
+    match (state, current_run()) {
+        (ProsthesisState::On, Some(run)) => (Some(run), false),
+        (ProsthesisState::On, None) => (Some(new_run(collection_id)), true),
         (ProsthesisState::Off, _) => (run_before, false),
     }
 }
@@ -83,7 +93,7 @@ enum ControlCommand {
     SetActuatorCurrent(u16),
 }
 
-fn parse_control_command(payload: &str) -> Result<(ControlCommand, Option<u64>), String> {
+fn parse_control_command(payload: &str) -> Result<(ControlCommand, Option<u64>, Option<String>), String> {
     let message: serde_json::Value = serde_json::from_str(payload.trim())
         .map_err(|e| format!("not valid JSON: {}", e))?;
 
@@ -130,7 +140,20 @@ fn parse_control_command(payload: &str) -> Result<(ControlCommand, Option<u64>),
         other => Err(format!("unknown command type: {}", other)),
     }?;
 
-    Ok((command, command_id))
+    Ok((command, command_id, parse_collection_id(&message)))
+}
+
+fn parse_collection_id(message: &serde_json::Value) -> Option<String> {
+    match message.get("collection_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_str().and_then(|id| uuid::Uuid::parse_str(id.trim()).ok()) {
+            Some(id) => Some(id.to_string()),
+            None => {
+                eprintln!("[CMD] Ignoring malformed collection_id {}; the command is kept", value);
+                None
+            }
+        },
+    }
 }
 
 fn read_unsigned_field(message: &serde_json::Value, key: &str) -> Result<u64, String> {
@@ -275,7 +298,7 @@ impl MqttPublisher {
         }));
 
         if lock_control_state(&control_state).prosthesis == ProsthesisState::On {
-            begin_run(new_run_id());
+            begin_run(new_run(None));
         }
 
         {
@@ -301,7 +324,8 @@ impl MqttPublisher {
             }
         });
 
-        let (commands, commands_receiver) = mpsc::channel::<(u64, ControlCommand, Option<u64>)>();
+        let (commands, commands_receiver) =
+            mpsc::channel::<(u64, ControlCommand, Option<u64>, Option<String>)>();
 
         eprintln!("[CMD] Spawning command worker...");
 
@@ -362,15 +386,15 @@ impl MqttPublisher {
                                 }
                             };
 
-                            if let Some((command, command_id)) = command {
+                            if let Some((command, command_id, collection_id)) = command {
                                 let generation = next_command_generation();
 
                                 eprintln!(
-                                    "[CMD] Received {:?} (command #{}, id {:?})",
-                                    command, generation, command_id
+                                    "[CMD] Received {:?} (command #{}, id {:?}, collection {:?})",
+                                    command, generation, command_id, collection_id
                                 );
 
-                                if let Err(e) = commands.send((generation, command, command_id)) {
+                                if let Err(e) = commands.send((generation, command, command_id, collection_id)) {
                                     eprintln!("[CMD] Command worker is gone, dropping {:?}: {:?}", command, e);
                                 }
                             }
@@ -415,7 +439,7 @@ impl MqttPublisher {
     }
 
     pub fn publish(&self, message: &str) {
-        if current_run_id().is_none() {
+        if current_run().is_none() {
             return;
         }
 
@@ -428,7 +452,7 @@ impl MqttPublisher {
 }
 
 fn run_control_commands(
-    commands: mpsc::Receiver<(u64, ControlCommand, Option<u64>)>,
+    commands: mpsc::Receiver<(u64, ControlCommand, Option<u64>, Option<String>)>,
     client: Client,
     power_feedback_topic: String,
     qos: QoS,
@@ -437,7 +461,7 @@ fn run_control_commands(
 ) {
     let prosthesis = prosthesis.as_ref();
 
-    for (generation, command, command_id) in commands {
+    for (generation, command, command_id, collection_id) in commands {
         let feedback_command = match command {
             ControlCommand::PowerOn => PowerCommand::On,
             ControlCommand::PowerOff => PowerCommand::Off,
@@ -454,6 +478,7 @@ fn run_control_commands(
             &control_state,
             feedback_command,
             command_id,
+            collection_id,
             |state| match command {
                 ControlCommand::PowerOn => {
                     let launch = state.launch();
@@ -477,6 +502,7 @@ fn run_control_commands(
     eprintln!("[CMD] Command queue closed, command worker stopping");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_control_command(
     client: &Client,
     topic: &str,
@@ -484,12 +510,13 @@ fn run_control_command(
     control_state: &Mutex<ControlState>,
     command: PowerCommand,
     command_id: Option<u64>,
+    collection_id: Option<String>,
     run: impl FnOnce(&mut ControlState) -> Result<String, String>,
 ) {
     let mut state = lock_control_state(control_state);
-    let run_before = current_run_id();
+    let run_before = current_run();
     let result = run(&mut state);
-    let (run_id, started) = feedback_run(run_before, state.prosthesis);
+    let (run_after, started) = feedback_run(run_before, state.prosthesis, collection_id);
 
     publish_power_feedback(
         client,
@@ -500,13 +527,13 @@ fn run_control_command(
         FeedbackOrigin::Remote,
         state.prosthesis,
         state.launch(),
-        run_id.clone(),
+        run_after.clone(),
         result,
     );
 
     if started {
-        if let Some(run_id) = run_id {
-            begin_run(run_id);
+        if let Some(run_after) = run_after {
+            begin_run(run_after);
         }
     }
 }
@@ -525,7 +552,7 @@ fn stop_prosthesis_out_of_band(
 
     next_command_generation();
 
-    let run_before = current_run_id();
+    let run_before = current_run();
     let mut killed = ProsthesisState::On;
     let result = stop_prosthesis(prosthesis, &mut killed)
         .map(|message| format!("stop requested by {}: {}", trigger, message))
@@ -539,7 +566,7 @@ fn stop_prosthesis_out_of_band(
         }
 
         // A stop never starts a run, so there is nothing to begin afterwards.
-        let (run_id, _) = feedback_run(run_before, state.prosthesis);
+        let (run, _) = feedback_run(run_before, state.prosthesis, None);
 
         publish_power_feedback(
             client,
@@ -550,7 +577,7 @@ fn stop_prosthesis_out_of_band(
             FeedbackOrigin::Internal,
             state.prosthesis,
             state.launch(),
-            run_id,
+            run,
             result,
         );
     }
@@ -629,9 +656,14 @@ fn publish_power_feedback(
     origin: FeedbackOrigin,
     state: ProsthesisState,
     launch: LaunchSettings,
-    run_id: Option<String>,
+    run: Option<Run>,
     result: Result<String, String>,
 ) {
+    let (run_id, collection_id) = match run {
+        Some(run) => (Some(run.id), run.collection_id),
+        None => (None, None),
+    };
+
     let (success, message) = match result {
         Ok(message) => {
             eprintln!("[CMD] {} succeeded: {}", command.as_str(), message);
@@ -653,6 +685,7 @@ fn publish_power_feedback(
         gait: launch.gait,
         current: launch.current,
         run_id,
+        collection_id,
         message,
     };
 

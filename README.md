@@ -43,7 +43,8 @@ Commands arrive on `MQTT_COMMAND_LOGS_VALIDATED_TOPIC` in the same JSON format t
   "command_id": 42,
   "timestamp": "2026-08-17T12:00:00+00:00",
   "command_type": 2,
-  "value": 1
+  "value": 1,
+  "collection_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
 }
 ```
 
@@ -57,6 +58,8 @@ Commands arrive on `MQTT_COMMAND_LOGS_VALIDATED_TOPIC` in the same JSON format t
 
 `command_id` is echoed in the feedback so the orchestrator can link the two; a command without it is still carried out, and its feedback carries `null`.
 
+`collection_id` is the data collection the app had open when it sent the command, or `null`. It does not change what the command does: the wrapper only files the run the command starts under it (see [Runs and sensor data](#runs-and-sensor-data)). A `collection_id` that is not a UUID is logged and dropped, never the command, since a stop must not be ignored over bookkeeping.
+
 The wrapper keeps the power state in memory (seeded from the running processes at startup), so repeating a power command that is already satisfied is a no-op. It also remembers the gait mode and the actuator current, so each restart keeps whatever the other one was last set to; until a command says otherwise they are `1` and `3000`, the control executable's own defaults. A payload that is not this JSON, an unknown `command_type`, or a value outside the range of its type is logged and ignored rather than started: a restart on a value nobody can interpret is worse than no restart.
 
 Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
@@ -67,6 +70,7 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
   "command_id": 42,
   "origin": "remote",
   "run_id": "3f2b8c1e-5a4d-4c7e-9b1a-2d6f0e8c4a17",
+  "collection_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
   "command": "set_actuator_current",
   "status": "success",
   "state": "on",
@@ -76,7 +80,7 @@ Every command answers on `MQTT_POWER_FEEDBACK_TOPIC`:
 }
 ```
 
-`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `origin` is `remote` for the answer to a command and `internal` for a stop the wrapper carried out on its own (see [Stopping from the Pi](#stopping-from-the-pi)), whose `command_id` is `null`. `gait` and `current` describe the program the prosthesis is running after the command, so they are `null` when it is off. `run_id` names the run the feedback belongs to (see [Runs and sensor data](#runs-and-sensor-data)). `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
+`command` is `power_on`, `power_off`, `set_gait` or `set_actuator_current`. `origin` is `remote` for the answer to a command and `internal` for a stop the wrapper carried out on its own (see [Stopping from the Pi](#stopping-from-the-pi)), whose `command_id` is `null`. `gait` and `current` describe the program the prosthesis is running after the command, so they are `null` when it is off. `run_id` names the run the feedback belongs to and `collection_id` the data collection of that run (see [Runs and sensor data](#runs-and-sensor-data)). `status` is `failure` only when the prosthesis did not reach the requested state — failing to start while off, or failing to stop while on. Commands that were already satisfied report `success`.
 
 ## Runs and sensor data
 
@@ -89,16 +93,18 @@ A run is one start of `RoboticLegControl` that passed its [startup check](#start
 
 A `RoboticLegControl` already running when the wrapper starts gets a run too, which no feedback has announced yet.
 
+A run belongs to the data collection of the command that started it, and every feedback that names the run carries that collection as `collection_id`, including the one that ends it. A run started outside a collection, or already running when the wrapper starts, has `null`. Only the command that starts a run sets its collection: a power on that finds a run still going reports the collection that run started in.
+
 Each batch of readings the control program sends over UDP is published on `MQTT_LOGS_TOPIC`, stamped with the time it arrived:
 
 ```json
 {
   "timestamp": "2026-08-17T12:00:05.012345+00:00",
-  "data": [{"t": 2.0125, "s": 1, "pJ": 3.4, "cJ": 512, "cJl": 512, "pP": 0.1, "cP": 80, "cPl": 80}]
+  "data": [{"s": 1, "t": 2.0125, "pJ": 3.4, "cJ": 512, "cJl": 512, "pP": 0.1, "cP": 80, "cPl": 80, "g1": 41.2, "g2": 30.5, "g3": 12.8, "g4": 0.4}]
 }
 ```
 
-`data` is the batch as the control program sent it (as text when it is not JSON). Batches are only forwarded while there is a run: those that arrive while the prosthesis is off, while a start is still being checked, or from a start that fails are dropped. A new run only begins forwarding after its feedback is published, so the orchestrator always hears of a run before its first reading, and can file each batch under the run the last feedback told it about.
+`data` is the batch as the control program sent it (as text when it is not JSON). Each reading has the microstate (`s`), the prosthesis clock (`t`), the angle, current and limited current of the knee (`pJ`, `cJ`, `cJl`) and of the ankle (`pP`, `cP`, `cPl`), and the four ground reaction force sensors (`g1` to `g4`, which have no unit). The bridge does not look inside the readings, so channels can be added to `send_sensor_data.m` without changing it. Batches are only forwarded while there is a run: those that arrive while the prosthesis is off, while a start is still being checked, or from a start that fails are dropped. A new run only begins forwarding after its feedback is published, so the orchestrator always hears of a run before its first reading, and can file each batch under the run the last feedback told it about.
 
 ## Startup check
 
@@ -147,7 +153,7 @@ cargo run -- --mock
 Commands, feedback and runs work as described above, but `RoboticLegControl` is never started:
 
 - Every command that is carried out succeeds, and its feedback says the prosthesis is simulated (`started the simulated prosthesis with gait 2 and current 5000`). A start takes 2.5 s, standing in for the [startup check](#startup-check); a stop takes 0.1 s. A payload the bridge cannot interpret is still ignored.
-- While the simulated prosthesis is on, made-up readings are sent to the bridge's own UDP port the way `send_sensor_data.m` sends them: batches of 7 samples at 80 Hz, two decimals per channel, the clock starting at 0 on every start — so, as with the real prosthesis, the first reading forwarded is from about 2.5 s on. They follow the gait mode (a gait cycle with its microstates for walking, stairs and slopes, slow sway for standing and sitting, repeated transfers for sit-to-stand and stand-to-sit), and `cJl` and `cPl` are `cJ` and `cP` clamped to the actuator current, so both commands show in the data. The shapes are only meant to look plausible.
+- While the simulated prosthesis is on, made-up readings are sent to the bridge's own UDP port the way `send_sensor_data.m` sends them: batches of 7 samples at 80 Hz, two decimals per channel, the clock starting at 0 on every start — so, as with the real prosthesis, the first reading forwarded is from about 2.5 s on. They follow the gait mode (a gait cycle with its microstates for walking, stairs and slopes, slow sway for standing and sitting, repeated transfers for sit-to-stand and stand-to-sit). `cJl` and `cPl` are `cJ` and `cP` clamped to the actuator current, so both commands show in the data, and `g1` to `g4` follow the load on the prosthesis as it rolls from the heel (`g1`) to the toe (`g4`). The shapes are only meant to look plausible.
 - The simulated prosthesis is off when the bridge starts. Stop signals work as in [Stopping from the Pi](#stopping-from-the-pi) (unix only); one that comes in during a start fails it, as it would the real one.
 
 A mock bridge on the same broker as the real one makes both answer every command, so stop the real one first or point the mock elsewhere. Variables already set in the environment take precedence over `.env`; for a local Mosquitto, in PowerShell:

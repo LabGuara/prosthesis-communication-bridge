@@ -18,6 +18,10 @@ const STOP_DURATION: Duration = Duration::from_millis(100);
 
 const MAX_LAG: Duration = Duration::from_secs(1);
 
+const GRF_POSITIONS: [f64; 4] = [0.0, 0.35, 0.65, 1.0];
+
+const GRF_SCALE: f64 = 50.0;
+
 #[derive(Clone, Copy, Debug)]
 struct Program {
     id: u64,
@@ -164,12 +168,13 @@ struct Reading {
     ankle: f64,
     ankle_current: f64,
     ankle_current_limited: f64,
+    grf: [f64; 4],
 }
 
 impl Reading {
     fn to_json(self) -> String {
         format!(
-            "{{\"s\":{:.2},\"t\":{:.2},\"pJ\":{:.2},\"cJ\":{:.2},\"cJl\":{:.2},\"pP\":{:.2},\"cP\":{:.2},\"cPl\":{:.2}}}",
+            "{{\"s\":{:.2},\"t\":{:.2},\"pJ\":{:.2},\"cJ\":{:.2},\"cJl\":{:.2},\"pP\":{:.2},\"cP\":{:.2},\"cPl\":{:.2},\"g1\":{:.2},\"g2\":{:.2},\"g3\":{:.2},\"g4\":{:.2}}}",
             self.state,
             self.t,
             self.knee,
@@ -178,6 +183,10 @@ impl Reading {
             self.ankle,
             self.ankle_current,
             self.ankle_current_limited,
+            self.grf[0],
+            self.grf[1],
+            self.grf[2],
+            self.grf[3],
         )
     }
 }
@@ -231,6 +240,7 @@ impl Simulator {
             ankle: pose.ankle + self.rng.noise(0.2),
             ankle_current,
             ankle_current_limited: ankle_current.clamp(-self.current_limit, self.current_limit),
+            grf: pose.grf().map(|grf| grf + self.rng.noise(0.8)),
         };
 
         self.step += 1;
@@ -311,6 +321,14 @@ struct Pose {
     ankle: f64,
     knee_current: f64,
     ankle_current: f64,
+    load: f64,
+    center_of_pressure: f64,
+}
+
+impl Pose {
+    fn grf(&self) -> [f64; 4] {
+        GRF_POSITIONS.map(|at| GRF_SCALE * self.load * (1.0 - (self.center_of_pressure - at).abs()).max(0.0))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -342,6 +360,8 @@ struct Stride {
     ankle: (f64, &'static [Bump]),
     knee_current: &'static [Bump],
     ankle_current: &'static [Bump],
+    stance: f64,
+    load: &'static [Bump],
 }
 
 impl Stride {
@@ -359,6 +379,8 @@ impl Stride {
             ankle: self.ankle.0 + gain * bumps(self.ankle.1, phase),
             knee_current: gain * bumps(self.knee_current, phase),
             ankle_current: gain * bumps(self.ankle_current, phase),
+            load: gain * bumps(self.load, phase),
+            center_of_pressure: smoothstep(0.0, self.stance, phase),
         }
     }
 }
@@ -374,6 +396,8 @@ const WALKING: Stride = Stride {
     ankle: (2.0, &[bump(-6.0, 0.04, 0.03), bump(10.0, 0.42, 0.11), bump(-18.0, 0.62, 0.045)]),
     knee_current: &[bump(4200.0, 0.12, 0.05), bump(900.0, 0.66, 0.05), bump(-2600.0, 0.88, 0.04)],
     ankle_current: &[bump(1200.0, 0.08, 0.03), bump(-4500.0, 0.55, 0.06), bump(700.0, 0.78, 0.06)],
+    stance: 0.6,
+    load: &[bump(1.0, 0.13, 0.07), bump(0.75, 0.30, 0.10), bump(1.05, 0.47, 0.06)],
 };
 
 const STAIR_ASCENT: Stride = Stride {
@@ -383,6 +407,8 @@ const STAIR_ASCENT: Stride = Stride {
     ankle: (0.0, &[bump(8.0, 0.10, 0.08), bump(-12.0, 0.55, 0.06), bump(10.0, 0.82, 0.08)]),
     knee_current: &[bump(6500.0, 0.18, 0.09), bump(-1500.0, 0.75, 0.06)],
     ankle_current: &[bump(-3800.0, 0.50, 0.07), bump(900.0, 0.85, 0.06)],
+    stance: 0.6,
+    load: &[bump(0.9, 0.15, 0.08), bump(1.15, 0.38, 0.10)],
 };
 
 const STAIR_DESCENT: Stride = Stride {
@@ -392,6 +418,8 @@ const STAIR_DESCENT: Stride = Stride {
     ankle: (0.0, &[bump(-18.0, 0.02, 0.05), bump(18.0, 0.45, 0.12), bump(-15.0, 0.90, 0.06)]),
     knee_current: &[bump(-5500.0, 0.40, 0.12), bump(800.0, 0.80, 0.06)],
     ankle_current: &[bump(2500.0, 0.08, 0.05), bump(-1800.0, 0.45, 0.10)],
+    stance: 0.55,
+    load: &[bump(1.25, 0.10, 0.06), bump(0.8, 0.35, 0.10)],
 };
 
 const UPSLOPE_WALKING: Stride = Stride {
@@ -401,6 +429,8 @@ const UPSLOPE_WALKING: Stride = Stride {
     ankle: (6.0, &[bump(12.0, 0.45, 0.12), bump(-16.0, 0.63, 0.045)]),
     knee_current: &[bump(5200.0, 0.15, 0.06), bump(-2400.0, 0.88, 0.04)],
     ankle_current: &[bump(-5000.0, 0.55, 0.06), bump(900.0, 0.78, 0.06)],
+    stance: 0.6,
+    load: &[bump(0.9, 0.13, 0.07), bump(0.7, 0.30, 0.10), bump(1.15, 0.48, 0.06)],
 };
 
 const DOWNSLOPE_WALKING: Stride = Stride {
@@ -410,6 +440,8 @@ const DOWNSLOPE_WALKING: Stride = Stride {
     ankle: (-4.0, &[bump(-10.0, 0.05, 0.03), bump(8.0, 0.42, 0.10), bump(-12.0, 0.62, 0.045)]),
     knee_current: &[bump(-3800.0, 0.20, 0.07), bump(-2600.0, 0.88, 0.04)],
     ankle_current: &[bump(1800.0, 0.08, 0.04), bump(-3000.0, 0.55, 0.06)],
+    stance: 0.6,
+    load: &[bump(1.15, 0.12, 0.06), bump(0.75, 0.30, 0.10), bump(0.95, 0.46, 0.06)],
 };
 
 fn standing(phase: f64, gain: f64) -> Pose {
@@ -421,6 +453,8 @@ fn standing(phase: f64, gain: f64) -> Pose {
         ankle: 1.0 + gain * 2.0 * (angle + 1.2).sin(),
         knee_current: 900.0 + gain * 500.0 * (angle + 0.4).sin(),
         ankle_current: -500.0 + gain * 350.0 * (angle + 1.6).sin(),
+        load: 0.5 + gain * 0.08 * (angle + 0.8).sin(),
+        center_of_pressure: 0.45 + gain * 0.08 * (angle + 2.0).sin(),
     }
 }
 
@@ -433,6 +467,8 @@ fn sitting(phase: f64, gain: f64) -> Pose {
         ankle: 4.0 + gain * 2.0 * (angle + 0.5).sin(),
         knee_current: gain * 150.0 * angle.cos(),
         ankle_current: gain * 80.0 * (angle + 0.5).cos(),
+        load: 0.06 + gain * 0.02 * angle.sin(),
+        center_of_pressure: 0.4,
     }
 }
 
@@ -447,6 +483,10 @@ fn transfer(phase: f64, gain: f64, rise_current: f64, lower_current: f64) -> Pos
             + gain * (bump(rise_current, 0.40, 0.05).at_phase(phase) + bump(lower_current, 0.90, 0.04).at_phase(phase)),
         ankle_current: -300.0 * standing
             + gain * (bump(-2200.0, 0.42, 0.05).at_phase(phase) + bump(900.0, 0.90, 0.04).at_phase(phase)),
+        load: 0.1
+            + 0.4 * standing
+            + gain * (bump(0.6, 0.40, 0.05).at_phase(phase) + bump(0.3, 0.90, 0.04).at_phase(phase)),
+        center_of_pressure: 0.4 + gain * bump(0.25, 0.38, 0.06).at_phase(phase),
     }
 }
 
