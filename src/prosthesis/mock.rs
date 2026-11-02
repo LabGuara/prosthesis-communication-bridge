@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::{LaunchSettings, Prosthesis};
 
-const BATCH_SIZE: usize = 7;
+const BATCH_SIZE: usize = 10;
 
 const DATAGRAM_SIZE: usize = 4000;
 
