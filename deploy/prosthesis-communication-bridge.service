@@ -9,7 +9,7 @@ User=root
 Group=root
 WorkingDirectory=/opt/prosthesis-communication-bridge
 EnvironmentFile=-/etc/prosthesis-communication-bridge.env
-ExecStart=/opt/prosthesis-communication-bridge/prosthesis-communication-bridge
+ExecStart=/opt/prosthesis-communication-bridge/prosthesis-communication-bridge --no-startup-check
 Restart=always
 RestartSec=5
 

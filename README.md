@@ -123,6 +123,8 @@ Any other bad start is killed and **retried for as long as it takes**, a second 
 
 Commands run on a worker thread of their own, one at a time in the order they arrived. That keeps the MQTT connection alive during a start that retries for minutes, which is what lets a power off get through to stop it.
 
+`--no-startup-check` turns the check off, for latency tests. A start then only launches `RoboticLegControl` and assumes it came up fine: it reports `success` and begins a run as soon as the process is launched, without watching the buffer, looking for actuators that do not answer, or retrying, and the executable's stdout goes straight to the bridge's own instead of being read. It reports `failure` only when the process cannot be launched at all, or when a newer command came in while the start was still queued, so a stop from the Pi still cancels the starts waiting behind it. Its feedback message ends in `without the startup check`. The systemd unit in [deploy/prosthesis-communication-bridge.service](deploy/prosthesis-communication-bridge.service) passes the flag for now; take it out of `ExecStart` to bring the check back.
+
 ## Stopping from the Pi
 
 The prosthesis can be stopped without going through the broker, for when the leg is doing something it should not and reaching for the server is not an option. [deploy/init.sh](deploy/init.sh) installs two commands into `/usr/local/bin`, and [deploy/cleanup.sh](deploy/cleanup.sh) removes them again:

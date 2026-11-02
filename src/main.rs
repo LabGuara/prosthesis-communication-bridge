@@ -49,21 +49,34 @@ fn listen_for_udp_logs(publisher: Option<Arc<MqttPublisher>>) -> io::Result<()> 
     }
 }
 
-fn mock_requested() -> bool {
-    let mut mock = false;
+struct Options {
+    mock: bool,
+    startup_check: bool,
+}
+
+fn parse_options() -> Options {
+    let mut options = Options {
+        mock: false,
+        startup_check: true,
+    };
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
-            "--mock" => mock = true,
-            other => eprintln!("Ignoring unknown argument {other:?} (the only option is --mock)"),
+            "--mock" => options.mock = true,
+            "--no-startup-check" => options.startup_check = false,
+            other => eprintln!(
+                "Ignoring unknown argument {other:?} (the options are --mock and --no-startup-check)"
+            ),
         }
     }
 
-    mock
+    options
 }
 
 fn run() -> io::Result<i32> {
-    let prosthesis: Arc<dyn Prosthesis> = if mock_requested() {
+    let options = parse_options();
+
+    let prosthesis: Arc<dyn Prosthesis> = if options.mock {
         eprintln!(
             "[MOCK] Mock mode: the prosthesis is simulated. Commands always succeed without starting \
              RoboticLegControl, and made-up sensor readings are sent to UDP port {}.",
@@ -71,7 +84,16 @@ fn run() -> io::Result<i32> {
         );
         MockProsthesis::spawn(UDP_LOGS_PORT)
     } else {
-        Arc::new(RealProsthesis)
+        if !options.startup_check {
+            eprintln!(
+                "[CMD] Startup check disabled (--no-startup-check): a start succeeds as soon as \
+                 RoboticLegControl is launched, without watching its buffer."
+            );
+        }
+
+        Arc::new(RealProsthesis {
+            startup_check: options.startup_check,
+        })
     };
 
     let publisher = match MqttPublisher::from_env(prosthesis) {

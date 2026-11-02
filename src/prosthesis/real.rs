@@ -25,7 +25,9 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const KILL_ESCALATION_DELAY: Duration = Duration::from_secs(3);
 
-pub struct RealProsthesis;
+pub struct RealProsthesis {
+    pub startup_check: bool,
+}
 
 impl Prosthesis for RealProsthesis {
     fn name(&self) -> &'static str {
@@ -37,7 +39,11 @@ impl Prosthesis for RealProsthesis {
     }
 
     fn start(&self, launch: LaunchSettings, superseded: &dyn Fn() -> bool) -> Result<String, String> {
-        start_robotic_leg_control(launch, superseded)
+        if self.startup_check {
+            start_robotic_leg_control(launch, superseded)
+        } else {
+            start_robotic_leg_control_unchecked(launch, superseded)
+        }
     }
 
     fn stop(&self) -> Result<String, String> {
@@ -83,6 +89,34 @@ fn robotic_leg_control_pids() -> Result<Vec<String>, String> {
         .split_whitespace()
         .map(|pid| pid.to_string())
         .collect())
+}
+
+fn start_robotic_leg_control_unchecked(
+    launch: LaunchSettings,
+    superseded: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    if superseded() {
+        return Err("start abandoned: a newer command came in".to_string());
+    }
+
+    let mut child = std::process::Command::new("sudo")
+        .arg(ROBOTIC_LEG_CONTROL_BIN)
+        .args(launch.as_args())
+        .spawn()
+        .map_err(|e| format!("failed to start RoboticLegControl: {:?}", e))?;
+
+    let pid = child.id();
+
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(format!(
+        "started RoboticLegControl with gait {} and current {} (sudo pid {}) without the startup check",
+        launch.gait,
+        launch.current,
+        pid
+    ))
 }
 
 fn start_robotic_leg_control(
